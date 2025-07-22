@@ -37,7 +37,7 @@ router.delete('/:id/like', authMiddleware, unlikePost);
 // Comments
 router.post('/:id/comments', authMiddleware, addComment);
 router.patch('/:id/comments/:commentId', authMiddleware, editComment);
-router.delete('/:id/comments/:commentId', authMiddleware, deleteComment);
+router.delete('/comments/:commentId', authMiddleware, deleteComment);
 
 // Sharing
 router.post('/:id/share', authMiddleware, sharePost);

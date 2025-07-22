@@ -8,6 +8,7 @@ const cloudinary = require('../utils/cloudinary');
 const fs = require('fs');
 const path = require('path');
 const Activity = require('../models/activityModel');
+const CommentModel = require('../models/commentModel');
 const { sanitize } = require('../utils/sanitizer');
 const bannedWords = require('../utils/bannedWords');
 const mongoose = require('mongoose');
@@ -133,17 +134,14 @@ const createPost = async (req, res, next) => {
     const { body, tags, location, scheduledAt } = req.body;
     const userId = req.user.id;
 
-    // Validate content
     if (!body && !req.files?.image) {
       return next(new HttpError(400, 'Post content or image is required'));
     }
 
-    // Content length validation
     if (body && body.length > MAX_POST_LENGTH) {
       return next(new HttpError(400, `Post exceeds ${MAX_POST_LENGTH} character limit`));
     }
 
-    // Content moderation
     if (body && containsBannedWords(body)) {
       return next(new HttpError(400, 'Post contains prohibited content'));
     }
@@ -157,7 +155,6 @@ const createPost = async (req, res, next) => {
       );
     }
 
-    // Process tags and mentions
     const tagArray = tags ? tags.split(',').map(tag => tag.trim().toLowerCase()) : [];
     const mentions = extractMentions(body);
 
@@ -173,7 +170,12 @@ const createPost = async (req, res, next) => {
     });
 
     await newPost.save();
-    
+
+    // Add post to user's posts array
+    await UserModel.findByIdAndUpdate(userId, {
+      $push: { posts: newPost._id }
+    });
+
     // Log activity
     await Activity.create({
       user: userId,
@@ -190,11 +192,13 @@ const createPost = async (req, res, next) => {
       ? { message: 'Post scheduled successfully', post: newPost, scheduledAt }
       : newPost
     );
+
   } catch (error) {
     console.error('Create Post Error:', error);
     return next(new HttpError(500, 'Failed to create post'));
   }
 };
+
 
 // ================= LIKE POST =================
 const likePost = async (req, res, next) => {
@@ -311,23 +315,40 @@ const addComment = async (req, res, next) => {
       return next(new HttpError(403, 'Action not allowed'));
     }
 
-    const commentId = new mongoose.Types.ObjectId();
     const mentions = extractMentions(text);
     
-    post.comments.push({
-      _id: commentId,
+    // Create full comment document
+    const newComment = new CommentModel({
+      post: postId,
       user: userId,
       text: sanitize(text),
       mentions
     });
-
+    await newComment.save();
+    
+    // Create minimal embedded comment
+    const embeddedComment = {
+      _id: newComment._id,
+      user: userId,
+      text: newComment.text,
+      createdAt: newComment.createdAt
+    };
+    
+    // Add to post's comments array
+    post.comments.push(embeddedComment);
     await post.save();
     
+    // Populate user info for response
+    const populatedComment = await CommentModel.populate(newComment, {
+      path: 'user',
+      select: 'userName fullName profilePhoto'
+    });
+
     // Log activity
     await Activity.create({
       user: userId,
       action: 'add_comment',
-      details: { postId, commentId }
+      details: { postId, commentId: newComment._id }
     });
     
     // Notify post owner and mentioned users
@@ -335,15 +356,16 @@ const addComment = async (req, res, next) => {
       await notifyUser(post.creator, 'comment', {
         postId,
         userId,
-        commentId
+        commentId: newComment._id
       });
     }
     
     if (mentions.length > 0) {
-      await notifyMentionedUsers(mentions, postId, userId, commentId);
+      await notifyMentionedUsers(mentions, postId, userId, newComment._id);
     }
 
-    res.status(201).json(post.comments);
+    // Return the full comment with user populated
+    res.status(201).json(populatedComment);
   } catch (error) {
     console.error('Add Comment Error:', error);
     return next(new HttpError(500, 'Failed to add comment'));
@@ -371,12 +393,8 @@ const editComment = async (req, res, next) => {
       return next(new HttpError(400, 'Comment contains prohibited content'));
     }
 
-    const post = await PostModel.findById(postId);
-    if (!post) {
-      return next(new HttpError(404, 'Post not found'));
-    }
-
-    const comment = post.comments.id(commentId);
+    // Find the full comment document
+    const comment = await CommentModel.findById(commentId);
     if (!comment) {
       return next(new HttpError(404, 'Comment not found'));
     }
@@ -387,12 +405,24 @@ const editComment = async (req, res, next) => {
     }
 
     const mentions = extractMentions(text);
-    comment.text = sanitize(text);
-    comment.isEdited = true;
-    comment.mentions = mentions;
-    comment.updatedAt = Date.now();
     
-    await post.save();
+    // Update full comment document
+    comment.text = sanitize(text);
+    comment.mentions = mentions;
+    comment.isEdited = true;
+    comment.updatedAt = Date.now();
+    await comment.save();
+    
+    // Update embedded comment in post
+    await PostModel.updateOne(
+      { _id: postId, 'comments._id': commentId },
+      { 
+        $set: { 
+          'comments.$.text': comment.text,
+          'comments.$.isEdited': true
+        } 
+      }
+    );
     
     // Log activity
     await Activity.create({
@@ -406,7 +436,11 @@ const editComment = async (req, res, next) => {
       await notifyMentionedUsers(mentions, postId, userId, commentId);
     }
 
-    res.status(200).json(post.comments);
+    // Return updated comment
+    const updatedComment = await CommentModel.findById(commentId)
+      .populate('user', 'userName fullName profilePhoto');
+      
+    res.status(200).json(updatedComment);
   } catch (error) {
     console.error('Edit Comment Error:', error);
     return next(new HttpError(500, 'Failed to edit comment'));
@@ -416,29 +450,36 @@ const editComment = async (req, res, next) => {
 // ================= DELETE COMMENT =================
 const deleteComment = async (req, res, next) => {
   try {
-    const { postId, commentId } = req.params;
+    const { commentId } = req.params; // Only need commentId
     const userId = req.user.id;
 
-    const post = await PostModel.findById(postId);
-    if (!post) {
-      return next(new HttpError(404, 'Post not found'));
-    }
-
-    const comment = post.comments.id(commentId);
+    // Find the full comment document
+    const comment = await CommentModel.findById(commentId);
     if (!comment) {
       return next(new HttpError(404, 'Comment not found'));
     }
 
-    // Check ownership or post ownership
+    // Get post ID from comment
+    const postId = comment.post;
+    
+    // Check authorization
     const isCommentOwner = comment.user.equals(userId);
-    const isPostOwner = post.creator.equals(userId);
+    const post = await PostModel.findById(postId);
+    const isPostOwner = post?.creator.equals(userId); // Optional chaining
     
     if (!isCommentOwner && !isPostOwner) {
       return next(new HttpError(403, 'Not authorized to delete this comment'));
     }
 
-    post.comments.pull(commentId);
-    await post.save();
+    // Delete full comment document
+    await CommentModel.findByIdAndDelete(commentId);
+    
+    // Remove from embedded comments (if post exists)
+    if (post) {
+      await PostModel.findByIdAndUpdate(postId, {
+        $pull: { comments: { _id: commentId } }
+      });
+    }
     
     // Log activity
     await Activity.create({
@@ -453,13 +494,12 @@ const deleteComment = async (req, res, next) => {
     return next(new HttpError(500, 'Failed to delete comment'));
   }
 };
-
 // ================= SHARE POST =================
 const sharePost = async (req, res, next) => {
   try {
     const postId = req.params.id;
     const userId = req.user.id;
-    const { message } = req.body;
+    const { message } = req.body || {};
     
     const originalPost = await PostModel.findById(postId);
     if (!originalPost) {
@@ -669,6 +709,7 @@ const getPost = async (req, res, next) => {
     const postId = req.params.id;
     const userId = req.user.id;
 
+    // Use lean() for read-only operation
     const post = await PostModel.findById(postId)
       .populate('creator', 'userName fullName profilePhoto isPrivate')
       .populate('likes.user', 'userName fullName profilePhoto')
@@ -676,36 +717,46 @@ const getPost = async (req, res, next) => {
       .populate('shares.user', 'userName fullName profilePhoto')
       .populate({
         path: 'originalPost',
-        populate: { path: 'creator', select: 'userName fullName profilePhoto' }
-      });
+        select: 'creator body image',
+        populate: { 
+          path: 'creator', 
+          select: 'userName fullName profilePhoto' 
+        }
+      })
+      .lean();
 
-    // Check post existence
-    if (!post || (post.deletedAt && post.deletionDeadline < new Date())) {
+    // Check post existence and deletion status
+    if (!post || post.deletedAt) {
       return next(new HttpError(404, 'Post not found'));
     }
 
-    // Check block status
+    // Check block status using cached user
     const creator = await getCachedUser(post.creator._id);
     if (creator.blockedUsers.some(id => id.equals(userId))) {
       return next(new HttpError(403, 'You are blocked by this user'));
     }
 
     // Check visibility for private accounts
-    const isNotFollowing = 
-      !creator.followers.some(id => id.equals(userId)) && 
-      !post.creator._id.equals(userId);
-      
-    if (creator.isPrivate && isNotFollowing) {
+    const isFollowing = creator.followers.some(id => id.equals(userId));
+    if (creator.isPrivate && !isFollowing && !creator._id.equals(userId)) {
       return next(new HttpError(403, 'This account is private'));
     }
 
-    // Track unique views
-    if (!post.views.includes(userId)) {
-      post.views.push(userId);
-      await post.save();
+    // Efficient view tracking using atomic update
+    if (!post.views.some(viewId => viewId.equals(userId))) {
+      await PostModel.updateOne(
+        { _id: postId, 'views': { $ne: userId } },
+        { $addToSet: { views: userId } }
+      );
     }
 
-    res.status(200).json(post);
+    // Add view status to response
+    const postWithViewStatus = { 
+      ...post, 
+      hasViewed: post.views.some(viewId => viewId.equals(userId))
+    };
+    
+    res.status(200).json(postWithViewStatus);
   } catch (error) {
     console.error('Get Post Error:', error);
     return next(new HttpError(500, 'Failed to get post'));
@@ -716,64 +767,62 @@ const getPost = async (req, res, next) => {
 const getAllPosts = async (req, res, next) => {
   try {
     const userId = req.user.id;
-    const { page = 1, limit = 10 } = req.query;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
     const skip = (page - 1) * limit;
 
-    // Validate user existence
-    const currentUser = await UserModel.findById(userId);
+    // Get following list from cached user
+    const currentUser = await getCachedUser(userId);
     if (!currentUser) {
       return next(new HttpError(404, "User not found"));
     }
 
-    // Convert following list to ObjectIds
-    const following = currentUser.following.map(id => id.toString());
+    // Create combined user IDs (following + self)
+    const visibleUserIds = [
+      ...currentUser.following, 
+      new mongoose.Types.ObjectId(userId)
+    ];
 
-    // Main query with combined conditions
+    // Optimized query with index support
     const query = {
-      $and: [
-        { 
-          $or: [
-            { creator: { $in: following } },
-            { creator: userId } 
-          ]
-        },
-        { deletedAt: null },
-        { 
-          $or: [
-            { isScheduled: false },
-            { 
-              isScheduled: true, 
-              scheduledAt: { $lte: new Date() } 
-            }
-          ]
-        }
+      creator: { $in: visibleUserIds },
+      deletedAt: null,
+      $or: [
+        { isScheduled: false },
+        { isScheduled: true, scheduledAt: { $lte: new Date() } }
       ]
     };
 
-    // Get total count BEFORE pagination
-    const totalPosts = await PostModel.countDocuments(query);
+    // Use parallel operations
+    const [totalPosts, posts] = await Promise.all([
+      PostModel.countDocuments(query),
+      PostModel.find(query)
+        .populate({
+          path: 'creator',
+          select: 'userName fullName profilePhoto isPrivate',
+          match: { blockedUsers: { $nin: [userId] } }
+        })
+        .populate('likes.user', 'userName fullName profilePhoto')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean()
+    ]);
 
-    // Fetch posts with optimized population
-    const posts = await PostModel.find(query)
-      .populate({
-        path: 'creator',
-        select: 'userName fullName profilePhoto isPrivate blockedUsers',
-        match: { blockedUsers: { $ne: userId } } // Pre-filter blocked
-      })
-      .populate('likes.user', 'userName fullName profilePhoto')
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(parseInt(limit))
-      .lean();
-
-    // Filter out null creators (blocked users)
-    const filteredPosts = posts.filter(post => post.creator !== null);
+    // Filter blocked users and add engagement metrics
+    const filteredPosts = posts
+      .filter(post => post.creator !== null)
+      .map(post => ({
+        ...post,
+        likeCount: post.likes.length,
+        commentCount: post.comments.length
+      }));
 
     res.status(200).json({
-      page: parseInt(page),
-      limit: parseInt(limit),
-      total: totalPosts,  // Actual total matching documents
-      count: filteredPosts.length,  // Current page count
+      page,
+      limit,
+      total: totalPosts,
+      count: filteredPosts.length,
       posts: filteredPosts
     });
   } catch (error) {
@@ -787,11 +836,14 @@ const getPostsByUser = async (req, res, next) => {
   try {
     const username = req.params.username;
     const currentUserId = req.user.id;
-    const { page = 1, limit = 10 } = req.query;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
     const skip = (page - 1) * limit;
 
-    // Get target user
-    const targetUser = await UserModel.findOne({ userName: username });
+    // Get target user with projection
+    const targetUser = await UserModel.findOne({ userName: username })
+      .select('_id followers isPrivate blockedUsers');
+    
     if (!targetUser) {
       return next(new HttpError(404, "User not found"));
     }
@@ -801,41 +853,43 @@ const getPostsByUser = async (req, res, next) => {
       return next(new HttpError(403, 'You are blocked by this user'));
     }
 
-    // Check privacy
-    const isNotFollowing = 
-      !targetUser.followers.some(id => id.equals(currentUserId)) && 
-      !targetUser._id.equals(currentUserId);
-      
-    if (targetUser.isPrivate && isNotFollowing) {
+    // Check privacy settings
+    const isFollowing = targetUser.followers.some(id => id.equals(currentUserId));
+    if (targetUser.isPrivate && !isFollowing && !targetUser._id.equals(currentUserId)) {
       return next(new HttpError(403, 'This account is private'));
     }
 
-    // Get posts
-    const posts = await PostModel.find({
+    // Query with index support
+    const postQuery = {
       creator: targetUser._id,
       deletedAt: null,
       $or: [
         { isScheduled: false },
         { isScheduled: true, scheduledAt: { $lte: new Date() } }
       ]
-    })
-    .populate('creator', 'userName fullName profilePhoto')
-    .populate('likes.user', 'userName fullName profilePhoto')
-    .sort({ createdAt: -1 })
-    .skip(skip)
-    .limit(parseInt(limit))
-    .lean();
+    };
 
-    const total = await PostModel.countDocuments({
-      creator: targetUser._id,
-      deletedAt: null
-    });
+    // Parallel execution
+    const [total, posts] = await Promise.all([
+      PostModel.countDocuments(postQuery),
+      PostModel.find(postQuery)
+        .populate('creator', 'userName fullName profilePhoto')
+        .populate('likes.user', 'userName fullName profilePhoto')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean()
+    ]);
 
     res.status(200).json({
       page,
       limit,
       total,
-      posts
+      posts: posts.map(post => ({
+        ...post,
+        likeCount: post.likes.length,
+        commentCount: post.comments.length
+      }))
     });
   } catch (error) {
     console.error('Get User Posts Error:', error);

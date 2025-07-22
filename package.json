@@ -1,6 +1,6 @@
 {
   "name": "server",
-  "version": "1.0.0",
+  "version": "1.1.2",
   "description": "",
   "main": "index.js",
   "scripts": {
@@ -9,10 +9,11 @@
     "start": "node index.js"
   },
   "keywords": [],
-  "author": "",
+  "author": "Nityananda",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@socket.io/redis-adapter": "^8.3.0",
     "bcryptjs": "^3.0.2",
     "cloudinary": "^2.7.0",
     "cors": "^2.8.5",
@@ -21,11 +22,14 @@
     "express": "^5.1.0",
     "express-fileupload": "^1.5.2",
     "express-rate-limit": "^8.0.1",
+    "ioredis": "^5.6.1",
     "jsdom": "^26.1.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.16.4",
+    "multer": "^2.0.2",
     "node-cache": "^5.1.2",
     "socket.io": "^4.8.1",
+    "socket.io-redis": "^5.4.0",
     "uuid": "^11.1.0"
   },
   "devDependencies": {

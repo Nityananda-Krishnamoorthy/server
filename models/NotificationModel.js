@@ -8,17 +8,18 @@ const notificationSchema = new Schema({
     required: true,
     index: true
   },
-  type: {
+ type: {
     type: String,
     required: true,
-    enum: ['like', 'comment', 'share', 'mention', 'follow', 'tag']
+    enum: ['like', 'comment', 'share', 'mention', 'follow', 'tag', 'message', 'call'] // Define all possible notification types
   },
-  data: {
-    // Flexible structure for different notification types
+   data: {
     actor: { type: Schema.Types.ObjectId, ref: 'User' },
+    conversation: { type: Schema.Types.ObjectId, ref: 'Conversation' }, // Added reference
+    message: { type: Schema.Types.ObjectId, ref: 'Message' }, // Added reference
     post: { type: Schema.Types.ObjectId, ref: 'Post' },
-    comment: { type: Schema.Types.ObjectId, ref: 'Post.comments' },
-    extra: { type: String } // For additional context if needed
+    comment: { type: Schema.Types.ObjectId, ref: 'Comment' },
+    extra: { type: String }
   },
   read: {
     type: Boolean,
@@ -55,6 +56,12 @@ notificationSchema.virtual('message').get(function() {
       return `${actor} started following you`;
     case 'tag':
       return `${actor} tagged you in a post`;
+    case 'message':
+      return this.data?.isGroup 
+        ? `New message in ${this.data?.groupName || 'group'}`
+        : `${actor} sent you a message`;
+    case 'call':
+      return `${actor} is calling you`;
     default:
       return 'New notification';
   }
@@ -64,6 +71,8 @@ notificationSchema.virtual('message').get(function() {
 notificationSchema.index({ user: 1, read: 1 });
 notificationSchema.index({ 'data.actor': 1 });
 notificationSchema.index({ 'data.post': 1 });
+notificationSchema.index({ 'data.conversationId': 1 });
+notificationSchema.index({ 'data.messageId': 1 });
 
 const Notification = mongoose.model('Notification', notificationSchema);
 
