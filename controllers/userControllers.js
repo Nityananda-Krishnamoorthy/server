@@ -9,6 +9,8 @@ const path = require('path');
 const cloudinary = require('../utils/cloudinary');
 const Activity = require('../models/activityModel');
 const ObjectId = require('mongoose').Types.ObjectId;
+const sendEmail  = require('../utils/emailSender');
+const crypto = require('crypto');
 
 // Helper function for input sanitization
 const sanitizeInput = (input) => {
@@ -97,10 +99,39 @@ const registerUser = async (req, res, next) => {
       password: hashedPassword,
     });
 
+    // Generate secure verification token
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    newUser.verificationToken = verificationToken;
+    newUser.verificationExpires = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
+
     const savedUser = await newUser.save();
 
-    // Omit password in response
-    const { password: _, ...userInfo } = savedUser.toObject();
+    // Send verification email
+    try {
+      const verificationLink = `${process.env.CLIENT_URL}/verify-email?token=${verificationToken}`;
+      
+      await sendEmail({
+        to: sanitizedEmail,
+        subject: "Verify Your Email",
+        html: `
+          <p>Click the link below to verify your email:</p>
+          <p><a href="${verificationLink}">${verificationLink}</a></p>
+          <p><em>This link expires in 24 hours</em></p>
+        `
+      });
+    } catch (emailError) {
+      console.error('Email sending failed:', emailError);
+      // Don't fail registration if email fails
+    }
+
+    // Omit sensitive fields in response
+    const userResponse = {
+      _id: savedUser._id,
+      fullName: savedUser.fullName,
+      userName: savedUser.userName,
+      email: savedUser.email,
+      createdAt: savedUser.createdAt
+    };
     
     // Log registration activity
     await Activity.create({
@@ -111,8 +142,8 @@ const registerUser = async (req, res, next) => {
     });
 
     return res.status(201).json({
-      message: 'User registered successfully',
-      user: userInfo,
+      message: 'User registered successfully. Check your email to verify your account.',
+      user: userResponse,
     });
   } catch (error) {
     console.error('Registration Error:', error);
@@ -126,13 +157,39 @@ const registerUser = async (req, res, next) => {
   }
 };
 
+//================== VERIFY EMAIL =================
+const verifyEmail = async (req, res, next) => {
+  try {
+    const { token } = req.params;
+    
+    const user = await UserModel.findOne({
+      verificationToken: token,
+      verificationExpires: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      return next(new HttpError(400, "Invalid or expired verification token."));
+    }
+
+    user.isVerified = true;
+    user.verificationToken = undefined;
+    user.verificationExpires = undefined;
+    await user.save();
+
+    res.status(200).json({ message: "Email verified successfully!" });
+  } catch (error) {
+    console.error("Email Verification Error:", error);
+    return next(new HttpError(500, "Email verification failed."));
+  }
+};
+
 // ================= LOGIN USER =================
 const loginUser = async (req, res, next) => {
   try {
     const { userNameOrEmail, password } = req.body;
 
     if (!userNameOrEmail || !password) {
-      return next(new HttpError(400, "Username or email and password are required."));
+      return next(new HttpError(400, "Username/email and password are required."));
     }
 
     // Sanitize input
@@ -147,22 +204,33 @@ const loginUser = async (req, res, next) => {
     );
 
     if (!user) {
-      return next(new HttpError(404, "User not found."));
+      return next(new HttpError(401, "Invalid credentials.")); // Generic for security
+    }
+
+    // Check email verification
+    if (!user.isVerified) {
+      return next(new HttpError(403, "Please verify your email before logging in."));
     }
 
     // Check password
     const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
-      return next(new HttpError(401, "Invalid password."));
+      return next(new HttpError(401, "Invalid credentials.")); // Generic for security
     }
 
     // Generate token
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || '1h' });
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { 
+      expiresIn: process.env.JWT_EXPIRES_IN || '1h' 
+    });
 
     res.status(200).json({
       message: "Login successful",
       token,
-      id: user._id,
+      user: {
+        id: user._id,
+        userName: user.userName,
+        profilePhoto: user.profilePhoto
+      }
     });
 
     // Log login activity
@@ -175,7 +243,111 @@ const loginUser = async (req, res, next) => {
 
   } catch (error) {
     console.error("Login Error:", error);
-    return next(new HttpError(500, "An error occurred while logging in the user."));
+    return next(new HttpError(500, "Login failed. Please try again later."));
+  }
+};
+
+// ================= FORGOT PASSWORD =================
+const forgotPassword = async (req, res, next) => {
+  try {
+    const { email } = req.body;
+    
+    if (!email) {
+      return next(new HttpError(400, "Email is required."));
+    }
+
+    const sanitizedEmail = sanitizeInput(email).toLowerCase();
+    const user = await UserModel.findOne({ email: sanitizedEmail });
+    
+    if (!user) {
+      // Don't reveal if email exists for security
+      return res.status(200).json({ message: "If an account exists, a reset email has been sent." });
+    }
+
+    // Generate secure reset token
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    user.resetPasswordToken = resetToken;
+    user.resetPasswordExpires = Date.now() + 30 * 60 * 1000; // 30 minutes
+    
+    await user.save();
+
+    // Send reset email
+    try {
+      const resetLink = `${process.env.CLIENT_URL}/reset-password?token=${resetToken}`;
+      
+      await sendEmail({
+        to: sanitizedEmail,
+        subject: "Password Reset Request",
+        html: `
+          <p>You requested a password reset. Click the link below to reset your password:</p>
+          <p><a href="${resetLink}">${resetLink}</a></p>
+          <p><em>This link expires in 30 minutes</em></p>
+          <p>If you didn't request this, please ignore this email.</p>
+        `
+      });
+    } catch (emailError) {
+      console.error('Password reset email failed:', emailError);
+      return next(new HttpError(500, "Failed to send reset email."));
+    }
+
+    res.status(200).json({ message: "Password reset email sent." });
+  } catch (error) {
+    console.error("Forgot Password Error:", error);
+    return next(new HttpError(500, "Password reset request failed."));
+  }
+};
+
+// ================= RESET PASSWORD =================
+const resetPassword = async (req, res, next) => {
+  try {
+    const { token, newPassword, confirmPassword } = req.body;
+    
+    if (!token || !newPassword || !confirmPassword) {
+      return next(new HttpError(400, "All fields are required."));
+    }
+    
+    if (newPassword !== confirmPassword) {
+      return next(new HttpError(400, "Passwords do not match."));
+    }
+
+    const user = await UserModel.findOne({
+      resetPasswordToken: token,
+      resetPasswordExpires: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      return next(new HttpError(400, "Invalid or expired reset token."));
+    }
+
+    // Validate and hash new password
+    try {
+      validatePassword(newPassword);
+    } catch (error) {
+      return next(error);
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    user.password = await bcrypt.hash(newPassword, salt);
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+    
+    await user.save();
+
+    // Notify user of password change
+    try {
+      await sendEmail({
+        to: user.email,
+        subject: "Password Changed Successfully",
+        text: "Your password has been successfully updated."
+      });
+    } catch (emailError) {
+      console.error('Password change notification failed:', emailError);
+    }
+
+    res.status(200).json({ message: "Password updated successfully." });
+  } catch (error) {
+    console.error("Reset Password Error:", error);
+    return next(new HttpError(500, "Password reset failed."));
   }
 };
 
@@ -749,7 +921,10 @@ const deactivateAccount = async (req, res, next) => {
 // ================= EXPORTS =================
 module.exports = {
   registerUser,
+  verifyEmail,
   loginUser,
+  forgotPassword,
+  resetPassword,
   getCurrentUser,
   getUserProfile,
   updateUser,

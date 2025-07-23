@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const authMiddleware = require('../middleware/authMiddleware');
+const {checkPostVisibility} = require('../middleware/PostVisibilityMiddleware');
 
 const {
   createPost,
@@ -28,27 +29,24 @@ router.post('/', authMiddleware, createPost);
 router.get('/', authMiddleware, getAllPosts);
 router.get('/user/:username', authMiddleware, getPostsByUser);
 router.get('/bookmarks', authMiddleware, getBookmarkedPosts);
-router.get('/:id', authMiddleware, getPost);
 
-// Reactions
-router.post('/:id/like', authMiddleware, likePost);
-router.delete('/:id/like', authMiddleware, unlikePost);
+// Apply visibility middleware to all post ID routes
+router.use('/:id', authMiddleware, checkPostVisibility);
 
-// Comments
-router.post('/:id/comments', authMiddleware, addComment);
-router.patch('/:id/comments/:commentId', authMiddleware, editComment);
-router.delete('/comments/:commentId', authMiddleware, deleteComment);
+// Post ID routes (protected by visibility check)
+router.get('/:id', getPost);
+router.patch('/:id', editPost);
+router.delete('/:id', deletePost);
+router.patch('/:id/recover', recoverPost);
+router.post('/:id/like', likePost);
+router.delete('/:id/like', unlikePost);
+router.post('/:id/comments', addComment);
+router.post('/:id/share', sharePost);
+router.post('/:id/bookmarks', bookmarkPost);
+router.delete('/:id/bookmarks', removeBookmark);
 
-// Sharing
-router.post('/:id/share', authMiddleware, sharePost);
-
-// Post Management
-router.patch('/:id', authMiddleware, editPost);
-router.delete('/:id', authMiddleware, deletePost);
-router.patch('/:id/recover', authMiddleware, recoverPost);
-
-// Bookmarks
-router.post('/:id/bookmarks', authMiddleware, bookmarkPost);
-router.delete('/:id/bookmarks', authMiddleware, removeBookmark);
+// Comments routes (need to adjust to include post ID)
+router.patch('/:id/comments/:commentId', editComment);
+router.delete('/:id/comments/:commentId', deleteComment);
 
 module.exports = router;

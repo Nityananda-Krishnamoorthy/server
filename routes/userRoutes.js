@@ -5,7 +5,10 @@ const { authLimiter } = require('../middleware/rateLimit');
 
 const {
   registerUser,
+  verifyEmail,
   loginUser,
+  forgotPassword,
+  resetPassword,
   getCurrentUser,
   getUserProfile,
   updateUser,
@@ -23,6 +26,10 @@ const {
 // Public
 router.post('/register', authLimiter, registerUser);
 router.post('/login', authLimiter, loginUser);
+// Email verification
+router.get('/verify-email/:token', verifyEmail);
+router.post('/forgot-password', forgotPassword);
+router.post('/reset-password', resetPassword);
 
 // Authenticated
 router.get('/me', authMiddleware, getCurrentUser);

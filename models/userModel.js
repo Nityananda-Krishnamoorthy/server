@@ -31,6 +31,8 @@ const userSchema = new Schema({
   isVerified: { type: Boolean, default: false },
   verificationToken: String,
   verificationExpires: Date,
+  resetPasswordToken: String,
+  resetPasswordExpires: Date,
 
   //2FA
   tfaEnabled: { type: Boolean, default: false },

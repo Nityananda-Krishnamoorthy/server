@@ -1,4 +1,4 @@
-const HttpError = require('../utils/httpError');
+const HttpError = require('../models/errorModel');
 
 // Middleware to check post visibility
 const checkPostVisibility = async (req, res, next) => {
@@ -22,3 +22,5 @@ const checkPostVisibility = async (req, res, next) => {
     return next(new HttpError(500, "Visibility check failed"));
   }
 };
+
+module.exports = { checkPostVisibility };
