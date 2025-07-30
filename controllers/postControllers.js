@@ -2,17 +2,17 @@ const PostModel = require('../models/postModel');
 const UserModel = require('../models/userModel');
 const Notification = require('../models/notificationModel');
 const HttpError = require('../models/errorModel');
-//const notifyUser = require('../utils/notifyUser');
+const notifyUser = require('../utils/notifyUser');
 const uuid = require('uuid').v4;
 const cloudinary = require('../utils/cloudinary');
 const fs = require('fs');
 const path = require('path');
-const Activity = require('../models/activityModel');
 const CommentModel = require('../models/commentModel');
 const { sanitize } = require('../utils/sanitizer');
 const bannedWords = require('../utils/bannedWords');
 const mongoose = require('mongoose');
 const NodeCache = require('node-cache');
+const schedulePostDeletion = require('../utils/SchdulePostDeletion')
 
 // Initialize cache
 const userCache = new NodeCache({ stdTTL: 300 }); // 5 minutes cache
@@ -21,19 +21,77 @@ const userCache = new NodeCache({ stdTTL: 300 }); // 5 minutes cache
 const MAX_POST_LENGTH = 2000;
 const MAX_COMMENT_LENGTH = 500;
 
+// 🧠 Helper to inject isBookmarked
+const injectBookmarkStatus = (post, userId) => {
+  if (!post || !userId) return;
+  const bookmarks = post.bookmarks || [];
+  post.isBookmarked = bookmarks.some(bm => bm.toString() === userId.toString());
+};
+
+const dispatchNotification = async (type, recipients, data) => {
+  try {
+    const notifications = recipients.map(userId => ({
+      user: userId,
+      type,
+      data: {
+        actor: data.actor,
+        ...data,
+        timestamp: new Date()
+      }
+    }));
+
+    if (notifications.length > 0) {
+      await Notification.insertMany(notifications);
+    }
+  } catch (error) {
+    console.error('Notification Dispatch Error:', error);
+  }
+};
+
+// ================= MODIFIED HELPER: NOTIFY PARTICIPANTS =================
+const notifyParticipants = async (type, recipients, data) => {
+  try {
+    if (!recipients || recipients.length === 0) return;
+    
+    await dispatchNotification(type, recipients, {
+      actor: data.actor,
+      ...data
+    });
+  } catch (error) {
+    console.error('Notification Error:', error);
+  }
+};
+
+
 // ================== HELPER FUNCTIONS ====================
 const uploadToCloudinary = async (file, folder, transformations = []) => {
   const tempFilePath = path.join(__dirname, '../uploads', `${uuid()}-${file.name}`);
   await file.mv(tempFilePath);
-  
+
+  const mimeType = file.mimetype;
+  let resourceType = 'auto'; // covers image, video, gif
+
+  if (mimeType.startsWith('image/')) {
+    resourceType = 'image';
+  } else if (mimeType.startsWith('video/')) {
+    resourceType = 'video';
+  }
+
   const result = await cloudinary.uploader.upload(tempFilePath, {
     folder,
+    resource_type: resourceType,
     transformation: transformations
   });
-  
+
   fs.unlinkSync(tempFilePath);
-  return result.secure_url;
+
+  return {
+    url: result.secure_url,
+    format: result.format,
+    resource_type: resourceType
+  };
 };
+
 
 // Improved profanity filter
 function containsBannedWords(content) {
@@ -91,42 +149,6 @@ async function notifyMentionedUsers(usernames, postId, userId, commentId = null)
   }
 }
 
-async function notifyUser(userId, type, data) {
-  try {
-    await Notification.create({
-      user: userId,
-      type,
-      data,
-      timestamp: new Date()
-    });
-  } catch (error) {
-    console.error('Notify User Error:', error);
-  }
-}
-
-function schedulePostDeletion(postId, deletionDate) {
-  const delay = deletionDate - Date.now();
-  
-  setTimeout(async () => {
-    try {
-      const post = await PostModel.findById(postId);
-      if (post && post.deletedAt && post.deletionDeadline < new Date()) {
-        // Delete image
-        if (post.image) {
-          const publicId = post.image.split('/').pop().split('.')[0];
-          await cloudinary.uploader.destroy(`posts/${publicId}`);
-        }
-        
-        // Delete post and related activities
-        await PostModel.findByIdAndDelete(postId);
-        await Activity.deleteMany({ 'details.postId': postId });
-        await Notification.deleteMany({ 'details.postId': postId });
-      }
-    } catch (error) {
-      console.error('Scheduled Post Deletion Error:', error);
-    }
-  }, delay);
-}
 
 // ================= CREATE POST =================
 const createPost = async (req, res, next) => {
@@ -134,8 +156,8 @@ const createPost = async (req, res, next) => {
     const { body, tags, location, scheduledAt } = req.body;
     const userId = req.user.id;
 
-    if (!body && !req.files?.image) {
-      return next(new HttpError(400, 'Post content or image is required'));
+    if (!body && !req.files?.media) {
+      return next(new HttpError(400, 'Post content or media is required'));
     }
 
     if (body && body.length > MAX_POST_LENGTH) {
@@ -146,51 +168,58 @@ const createPost = async (req, res, next) => {
       return next(new HttpError(400, 'Post contains prohibited content'));
     }
 
-    let imageUrl = '';
-    if (req.files?.image) {
-      imageUrl = await uploadToCloudinary(
-        req.files.image, 
-        'posts', 
-        [{ width: 1000, crop: "limit" }, { quality: "auto" }]
-      );
+    let media = [];
+
+    if (req.files?.media) {
+      const files = Array.isArray(req.files.media) ? req.files.media : [req.files.media];
+
+      for (const file of files) {
+        const upload = await uploadToCloudinary(
+          file,
+          'posts',
+          [{ width: 1000, crop: "limit" }, { quality: "auto" }]
+        );
+
+        media.push({
+          url: upload.url,
+          type: upload.resource_type
+        });
+      }
     }
 
-    const tagArray = tags ? tags.split(',').map(tag => tag.trim().toLowerCase()) : [];
+    const tagArray = tags
+      ? Array.isArray(tags)
+        ? tags.map(tag => tag.trim().toLowerCase())
+        : tags.split(',').map(tag => tag.trim().toLowerCase())
+      : [];
+
     const mentions = extractMentions(body);
 
     const newPost = new PostModel({
       creator: userId,
       body: body ? sanitize(body) : '',
       tags: tagArray,
-      mentions: mentions,
+      mentions,
       location: location || '',
-      image: imageUrl,
+      media,
       isScheduled: !!scheduledAt,
       scheduledAt: scheduledAt || null
     });
 
     await newPost.save();
 
-    // Add post to user's posts array
     await UserModel.findByIdAndUpdate(userId, {
       $push: { posts: newPost._id }
     });
 
-    // Log activity
-    await Activity.create({
-      user: userId,
-      action: 'create_post',
-      details: { postId: newPost._id }
-    });
-
-    // Notify mentioned users
     if (mentions.length > 0) {
       await notifyMentionedUsers(mentions, newPost._id, userId);
     }
 
-    res.status(201).json(scheduledAt 
-      ? { message: 'Post scheduled successfully', post: newPost, scheduledAt }
-      : newPost
+    return res.status(201).json(
+      scheduledAt
+        ? { message: 'Post scheduled successfully', post: newPost }
+        : newPost
     );
 
   } catch (error) {
@@ -199,50 +228,55 @@ const createPost = async (req, res, next) => {
   }
 };
 
-
 // ================= LIKE POST =================
 const likePost = async (req, res, next) => {
   try {
     const postId = req.params.id;
-    const userId = req.user.id;
-    
+    // Inside likePost controller
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
+
+
+    //  Find the post
     const post = await PostModel.findById(postId);
     if (!post) {
       return next(new HttpError(404, 'Post not found'));
     }
 
-    // Check if user is blocked
+    // Get the post creator and check if user is blocked
     const creator = await getCachedUser(post.creator);
-    if (creator.blockedUsers.some(id => id.equals(userId))) {
-      return next(new HttpError(403, 'Action not allowed'));
+    if (creator?.blockedUsers?.map(id => id.toString()).includes(userId)) {
+      return next(new HttpError(403, 'Action not allowed — you are blocked by this user'));
     }
 
-    // Check if already liked
-    const existingLikeIndex = post.likes.findIndex(like => like.user.equals(userId));
-    if (existingLikeIndex > -1) {
-      return next(new HttpError(400, 'Post already liked'));
-    }
-
-    // Add like
-    post.likes.push({ user: userId });
+    // Check if user already liked the post
+    const alreadyLiked = post.likes.some(like => like.user.toString() === userId);
+    if (alreadyLiked) return next(new HttpError(400, 'Post already liked'));
+    if (post.creator.toString() === userId) {
+    return next(new HttpError(400, 'You cannot like your own post'));
+  }
+      //  Add like
+    post.likes.push({ user: userId, timestamp: new Date() });
     await post.save();
-    
-    // Log activity
-    await Activity.create({
-      user: userId,
-      action: 'like_post',
-      details: { postId }
-    });
-    
-    // Notify post owner
-    if (!post.creator.equals(userId)) {
-      await notifyUser(post.creator, 'like', {
-        postId,
-        userId
-      });
-    }
 
-    res.status(200).json({ message: 'Post liked', likes: post.likes });
+    
+
+ 
+
+    //  Log user Notification
+      await notifyParticipants('like', [post.creator], {
+      actor: userId,
+      postId,
+      isGroup: false
+    });
+
+
+    //  Respond
+    res.status(200).json({
+      message: 'Post liked successfully',
+      likes: post.likes
+    });
+
   } catch (error) {
     console.error('Like Post Error:', error);
     return next(new HttpError(500, 'Failed to like post'));
@@ -254,34 +288,40 @@ const unlikePost = async (req, res, next) => {
   try {
     const postId = req.params.id;
     const userId = req.user.id;
-    
+
+
     const post = await PostModel.findById(postId);
     if (!post) {
       return next(new HttpError(404, 'Post not found'));
     }
 
-    // Find and remove like
-    const likeIndex = post.likes.findIndex(like => like.user.equals(userId));
+    const likeIndex = post.likes.findIndex(
+      like => like.user.toString() === userId
+    );
+
     if (likeIndex === -1) {
       return next(new HttpError(400, 'Post not liked'));
     }
 
+    // Remove like
     post.likes.splice(likeIndex, 1);
     await post.save();
-    
-    // Log activity
-    await Activity.create({
-      user: userId,
-      action: 'unlike_post',
-      details: { postId }
-    });
 
-    res.status(200).json({ message: 'Post unliked', likes: post.likes });
+    
+    // await notifyParticipants('unlike', [post.creator], {
+    //   actor: userId,
+    //   postId,
+    //   isGroup: false
+    // });
+
+    return res.status(200).json({ message: 'Post unliked', likes: post.likes });
   } catch (error) {
     console.error('Unlike Post Error:', error);
     return next(new HttpError(500, 'Failed to unlike post'));
   }
 };
+
+
 
 // ================= ADD COMMENT =================
 const addComment = async (req, res, next) => {
@@ -344,21 +384,18 @@ const addComment = async (req, res, next) => {
       select: 'userName fullName profilePhoto'
     });
 
-    // Log activity
-    await Activity.create({
-      user: userId,
-      action: 'add_comment',
-      details: { postId, commentId: newComment._id }
-    });
-    
-    // Notify post owner and mentioned users
+    // Log Notification
+    const recipients = [];
     if (!post.creator.equals(userId)) {
-      await notifyUser(post.creator, 'comment', {
-        postId,
-        userId,
-        commentId: newComment._id
-      });
+      recipients.push(post.creator);
     }
+    
+    await notifyParticipants('comment', recipients, {
+      actor: userId,
+      postId,
+      commentId: newComment._id,
+      isGroup: false
+    });
     
     if (mentions.length > 0) {
       await notifyMentionedUsers(mentions, postId, userId, newComment._id);
@@ -424,11 +461,11 @@ const editComment = async (req, res, next) => {
       }
     );
     
-    // Log activity
-    await Activity.create({
-      user: userId,
-      action: 'edit_comment',
-      details: { postId, commentId }
+      await notifyParticipants('edit_comment', [comment.user], {
+      actor: userId,
+      postId,
+      commentId,
+      isGroup: false
     });
     
     // Notify new mentioned users
@@ -461,11 +498,19 @@ const deleteComment = async (req, res, next) => {
 
     // Get post ID from comment
     const postId = comment.post;
+    let isPostOwner = false;
+    let post = null;
+
+    if (postId) {
+      post = await PostModel.findById(postId);
+      isPostOwner = post?.creator?.equals(userId);
+    }
+
     
     // Check authorization
     const isCommentOwner = comment.user.equals(userId);
-    const post = await PostModel.findById(postId);
-    const isPostOwner = post?.creator.equals(userId); // Optional chaining
+    // const post = await PostModel.findById(postId);
+    // const isPostOwner = post?.creator.equals(userId); // Optional chaining
     
     if (!isCommentOwner && !isPostOwner) {
       return next(new HttpError(403, 'Not authorized to delete this comment'));
@@ -481,16 +526,16 @@ const deleteComment = async (req, res, next) => {
       });
     }
     
-    // Log activity
-    await Activity.create({
-      user: userId,
-      action: 'delete_comment',
-      details: { postId, commentId }
+    // Log Notification
+     await notifyParticipants('delete_comment', [comment.user], {
+      actor: userId,
+      postId,
+      commentId,
+      isGroup: false
     });
-
     res.status(200).json({ message: 'Comment deleted' });
   } catch (error) {
-    console.error('Delete Comment Error:', error);
+    console.error('Delete Comment Error:', error.message, error.stack);
     return next(new HttpError(500, 'Failed to delete comment'));
   }
 };
@@ -530,18 +575,13 @@ const sharePost = async (req, res, next) => {
     originalPost.shares.push({ user: userId });
     await originalPost.save();
     
-    // Log activity
-    await Activity.create({
-      user: userId,
-      action: 'share_post',
-      details: { originalPostId: postId, newPostId: newPost._id }
-    });
-    
-    // Notify original creator
+    // Log Notification
     if (!originalPost.creator.equals(userId)) {
-      await notifyUser(originalPost.creator, 'share', {
+      await notifyParticipants('share', [originalPost.creator], {
+        actor: userId,
         postId,
-        userId
+        newPostId: newPost._id,
+        isGroup: false
       });
     }
 
@@ -560,68 +600,38 @@ const editPost = async (req, res, next) => {
   try {
     const postId = req.params.id;
     const userId = req.user.id;
-    const { body, tags, location } = req.body;
 
     const post = await PostModel.findById(postId);
-    if (!post) {
-      return next(new HttpError(404, 'Post not found'));
+    if (!post) return res.status(404).json({ message: 'Post not found' });
+    if (post.creator.toString() !== userId) {
+      return res.status(403).json({ message: 'Unauthorized' });
     }
 
-    // Check ownership
-    if (!post.creator.equals(userId)) {
-      return next(new HttpError(403, 'Not authorized to edit this post'));
-    }
-    
-    // Content moderation
-    if (body && containsBannedWords(body)) {
-      return next(new HttpError(400, 'Post contains prohibited content'));
-    }
-    
-    // Content length validation
-    if (body && body.length > MAX_POST_LENGTH) {
-      return next(new HttpError(400, `Post exceeds ${MAX_POST_LENGTH} character limit`));
+    const { body, tags, location } = req.body;
+    const updatedFields = {
+      body: body || post.body,
+      tags: tags ? tags.split(',').map(tag => tag.trim()) : post.tags,
+      location: location || post.location,
+    };
+
+    // Handle media if uploaded
+    if (req.files && req.files.length > 0) {
+      updatedFields.media = req.files.map(file => ({
+        url: file.path, // Or Cloudinary URL
+        type: file.mimetype.startsWith('image')
+          ? 'image'
+          : file.mimetype.startsWith('video')
+          ? 'video'
+          : file.mimetype.startsWith('audio')
+          ? 'audio'
+          : 'unknown',
+      }));
     }
 
-    let newImageUrl;
-    if (req.files?.image) {
-      newImageUrl = await uploadToCloudinary(
-        req.files.image, 
-        'posts', 
-        [{ width: 1000, crop: "limit" }, { quality: "auto" }]
-      );
-      
-      // Delete old image if exists
-      if (post.image) {
-        const publicId = post.image.split('/').pop().split('.')[0];
-        await cloudinary.uploader.destroy(`posts/${publicId}`);
-      }
-    }
-
-    // Update fields
-    if (body) {
-      post.body = sanitize(body);
-      post.mentions = extractMentions(body);
-    }
-    if (tags) post.tags = tags.split(',').map(tag => tag.trim().toLowerCase());
-    if (location) post.location = location;
-    if (newImageUrl) post.image = newImageUrl;
-    
-    post.isEdited = true;
-    post.editedAt = Date.now();
-    
-    await post.save();
-    
-    // Log activity
-    await Activity.create({
-      user: userId,
-      action: 'edit_post',
-      details: { postId }
-    });
-
-    res.status(200).json(post);
-  } catch (error) {
-    console.error('Edit Post Error:', error);
-    return next(new HttpError(500, 'Failed to edit post'));
+    const updatedPost = await PostModel.findByIdAndUpdate(postId, updatedFields, { new: true });
+    res.status(200).json(updatedPost);
+  } catch (err) {
+    next(err);
   }
 };
 
@@ -632,39 +642,74 @@ const deletePost = async (req, res, next) => {
     const userId = req.user.id;
 
     const post = await PostModel.findById(postId);
-    if (!post) {
-      return next(new HttpError(404, 'Post not found'));
-    }
+    if (!post) return next(new HttpError(404, 'Post not found'));
 
-    // Check ownership
     if (!post.creator.equals(userId)) {
       return next(new HttpError(403, 'Not authorized to delete this post'));
     }
 
-    // Soft delete with recovery period
+    // Soft delete
     post.deletedAt = Date.now();
-    post.deletionDeadline = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+    post.deletionDeadline = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
     await post.save();
 
-    // Schedule permanent deletion
     schedulePostDeletion(postId, post.deletionDeadline);
-    
-    // Log activity
-    await Activity.create({
-      user: userId,
-      action: 'delete_post',
-      details: { postId }
-    });
 
-    res.status(200).json({ 
-      message: 'Post marked for deletion',
+    res.status(200).json({
+      message: 'Post marked for deletion. Recover within 30 days.',
       recoverableUntil: post.deletionDeadline
     });
-  } catch (error) {
-    console.error('Delete Post Error:', error);
-    return next(new HttpError(500, 'Failed to delete post'));
+  } catch (err) {
+    console.error('Delete Post Error:', err);
+    next(new HttpError(500, 'Failed to delete post'));
   }
 };
+//=================== DELETE PERMANENENTLY ============
+const deletePostPermanently = async (req, res, next) => {
+  try {
+    const postId = req.params.id;
+    const userId = req.user.id;
+
+    const post = await PostModel.findById(postId);
+    if (!post) return next(new HttpError(404, 'Post not found'));
+
+    if (!post.creator.equals(userId)) {
+      return next(new HttpError(403, 'Not authorized to delete this post'));
+    }
+
+    if (!post.deletedAt) {
+      return next(new HttpError(400, 'Post must be soft-deleted first'));
+    }
+
+    await PostModel.findByIdAndDelete(postId);
+
+    res.status(200).json({ message: 'Post permanently deleted' });
+  } catch (err) {
+    console.error('Permanent Delete Error:', err);
+    next(new HttpError(500, 'Failed to permanently delete post'));
+  }
+};
+
+
+
+const getDeletedPosts = async (req, res, next) => {
+  try {
+    const posts = await PostModel.find({
+  creator: req.user.id,
+  deletedAt: { $ne: null },
+  deletionDeadline: { $gte: new Date() }
+})
+  .sort({ deletedAt: -1 })
+  .lean(); // optional
+
+
+    res.status(200).json(posts);
+  } catch (err) {
+    console.error('Get Deleted Posts Error:', err);
+    next(new HttpError(500, 'Failed to fetch deleted posts'));
+  }
+};
+
 
 // ================= RECOVER POST =================
 const recoverPost = async (req, res, next) => {
@@ -672,42 +717,35 @@ const recoverPost = async (req, res, next) => {
     const postId = req.params.id;
     const userId = req.user.id;
 
-    const post = await PostModel.findById(postId);
+    const post = await PostModel.findOne({ _id: postId, creator: userId });
+
     if (!post) {
-      return next(new HttpError(404, 'Post not found'));
+      return res.status(404).json({ message: 'Post not found' });
     }
 
-    if (!post.creator.equals(userId)) {
-      return next(new HttpError(403, 'Not authorized to recover this post'));
-    }
-
-    if (!post.deletedAt || post.deletionDeadline < new Date()) {
-      return next(new HttpError(400, 'Post cannot be recovered'));
+    if (!post.deletedAt) {
+      return res.status(400).json({ message: 'Post is not deleted' });
     }
 
     post.deletedAt = null;
     post.deletionDeadline = null;
     await post.save();
-    
-    // Log activity
-    await Activity.create({
-      user: userId,
-      action: 'recover_post',
-      details: { postId }
-    });
 
-    res.status(200).json({ message: 'Post recovered successfully' });
-  } catch (error) {
-    console.error('Recover Post Error:', error);
-    return next(new HttpError(500, 'Failed to recover post'));
+    res.status(200).json({ message: 'Post recovered successfully', post });
+  } catch (err) {
+    console.error('Recover Post Error:', err);
+    next(new HttpError(500, 'Failed to recover post'));
   }
 };
+
 
 // ================= GET POST DETAILS =================
 const getPost = async (req, res, next) => {
   try {
     const postId = req.params.id;
     const userId = req.user.id;
+    
+
 
     // Use lean() for read-only operation
     const post = await PostModel.findById(postId)
@@ -735,6 +773,17 @@ const getPost = async (req, res, next) => {
     if (creator.blockedUsers.some(id => id.equals(userId))) {
       return next(new HttpError(403, 'You are blocked by this user'));
     }
+    if (creator.blockedUsers.some(id => id.equals(userId))) {
+  return next(new HttpError(403, 'You are blocked by this user'));
+    }
+    if (creator.isPrivate && !isFollowing && !creator._id.equals(userId)) {
+      return next(new HttpError(403, 'This account is private'));
+    }
+
+    if (!post || post.deletedAt) {
+  return next(new HttpError(404, 'Post not found'));
+}
+
 
     // Check visibility for private accounts
     const isFollowing = creator.followers.some(id => id.equals(userId));
@@ -762,6 +811,19 @@ const getPost = async (req, res, next) => {
     return next(new HttpError(500, 'Failed to get post'));
   }
 };
+const getUserPost = async (req, res, next) => {
+  try {
+    const user = await UserModel.findById(req.params.id).select('-password');
+    if (!user) {
+      return next(new HttpError(404, 'User not found'));
+    }
+
+    res.status(200).json(user);
+  } catch (error) {
+    console.error('Get User By ID Error:', error);
+    return next(new HttpError(500, 'Failed to fetch user'));
+  }
+};
 
 // ================= GET ALL POSTS (TIMELINE) =================
 const getAllPosts = async (req, res, next) => {
@@ -771,52 +833,57 @@ const getAllPosts = async (req, res, next) => {
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
     const skip = (page - 1) * limit;
 
-    // Get following list from cached user
     const currentUser = await getCachedUser(userId);
     if (!currentUser) {
       return next(new HttpError(404, "User not found"));
     }
+    const isExplore = req.query.explore === 'true';
 
-    // Create combined user IDs (following + self)
     const visibleUserIds = [
-      ...currentUser.following, 
+      ...currentUser.following.map(id => new mongoose.Types.ObjectId(id)),
       new mongoose.Types.ObjectId(userId)
     ];
 
-    // Optimized query with index support
     const query = {
-      creator: { $in: visibleUserIds },
       deletedAt: null,
       $or: [
         { isScheduled: false },
         { isScheduled: true, scheduledAt: { $lte: new Date() } }
       ]
     };
+    if (!isExplore) {
+      query.creator = { $in: visibleUserIds };
+    }
 
-    // Use parallel operations
     const [totalPosts, posts] = await Promise.all([
       PostModel.countDocuments(query),
       PostModel.find(query)
-        .populate({
-          path: 'creator',
-          select: 'userName fullName profilePhoto isPrivate',
-          match: { blockedUsers: { $nin: [userId] } }
-        })
-        .populate('likes.user', 'userName fullName profilePhoto')
+          .populate({
+                path: "creator",
+                select: "userName fullName profilePhoto isPrivate blockedUsers"
+              })
+
+        .populate("likes bookmarks", "userName fullName profilePhoto")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
+        .select("+deletedAt creater media comments body likes shares tags mentions bookmarks location views originalPost sharedContent") // Include `comments` and `likes` if using `.lean()`
         .lean()
+        
     ]);
 
-    // Filter blocked users and add engagement metrics
-    const filteredPosts = posts
-      .filter(post => post.creator !== null)
-      .map(post => ({
-        ...post,
-        likeCount: post.likes.length,
-        commentCount: post.comments.length
-      }));
+     const filteredPosts = posts
+  .filter(post => {
+    if (!post.creator) return false;
+    if (isExplore && post.creator.isPrivate) return false;
+    return true;
+  })
+  .map(post => ({
+    ...post,
+    likeCount: post.likes?.length || 0,
+    commentCount: post.comments?.length || 0
+  }));
+
 
     res.status(200).json({
       page,
@@ -826,8 +893,8 @@ const getAllPosts = async (req, res, next) => {
       posts: filteredPosts
     });
   } catch (error) {
-    console.error('Get All Posts Error:', error);
-    next(new HttpError(500, 'Failed to fetch posts'));
+    console.error("Get All Posts Error:", error);
+    next(new HttpError(500, "Failed to fetch posts"));
   }
 };
 
@@ -873,14 +940,14 @@ const getPostsByUser = async (req, res, next) => {
     const [total, posts] = await Promise.all([
       PostModel.countDocuments(postQuery),
       PostModel.find(postQuery)
+      .select('+deletedAt')
         .populate('creator', 'userName fullName profilePhoto')
-        .populate('likes.user', 'userName fullName profilePhoto')
+        .populate('likes bookmarks', 'userName fullName profilePhoto')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .lean()
     ]);
-
     res.status(200).json({
       page,
       limit,
@@ -904,31 +971,33 @@ const bookmarkPost = async (req, res, next) => {
     const userId = req.user.id;
 
     const post = await PostModel.findById(postId);
-    if (!post) {
-      return next(new HttpError(404, 'Post not found'));
-    }
+    if (!post) return next(new HttpError(404, "Post not found"));
 
-    // Check if already bookmarked
     const user = await UserModel.findById(userId);
-    if (user.bookmarks.some(bm => bm.equals(postId))) {
-      return next(new HttpError(400, 'Post already bookmarked'));
+    if (!user) return next(new HttpError(404, "User not found"));
+
+    if (user.bookmarks?.some(bm => bm.toString() === postId)) {
+      return next(new HttpError(400, "Post already bookmarked"));
     }
 
-    // Add bookmark
     user.bookmarks.push(postId);
     await user.save();
-    
-    // Log activity
-    await Activity.create({
-      user: userId,
-      action: 'bookmark_post',
-      details: { postId }
+
+    res.status(200).json({
+      message: "Post bookmarked",
+      isBookmarked: true,
+      postId
     });
 
-    res.status(200).json({ message: 'Post bookmarked' });
+    notifyParticipants("bookmark", [userId], {
+      actor: userId,
+      postId,
+      isGroup: false
+    }).catch(console.error);
+
   } catch (error) {
-    console.error('Bookmark Post Error:', error);
-    return next(new HttpError(500, 'Failed to bookmark post'));
+    console.error("Bookmark Post Error:", error);
+    return next(new HttpError(500, "Failed to bookmark post"));
   }
 };
 
@@ -939,8 +1008,11 @@ const removeBookmark = async (req, res, next) => {
     const userId = req.user.id;
 
     const user = await UserModel.findById(userId);
-    const index = user.bookmarks.findIndex(bm => bm.equals(postId));
-    
+    if (!user) {
+      return next(new HttpError(404, 'User not found'));
+    }
+
+    const index = user.bookmarks.findIndex(bm => bm?.toString() === postId);
     if (index === -1) {
       return next(new HttpError(400, 'Post not bookmarked'));
     }
@@ -948,12 +1020,21 @@ const removeBookmark = async (req, res, next) => {
     user.bookmarks.splice(index, 1);
     await user.save();
 
-    res.status(200).json({ message: 'Bookmark removed' });
+    res.status(200).json({ message: 'Bookmark removed', postId });
+
+    // Optional: Notify (non-blocking)
+    notifyParticipants('remove_bookmark', [userId], {
+      actor: userId,
+      postId,
+      isGroup: false
+    }).catch(console.error);
+
   } catch (error) {
     console.error('Remove Bookmark Error:', error);
     return next(new HttpError(500, 'Failed to remove bookmark'));
   }
 };
+
 
 // ================= GET BOOKMARKED POSTS =================
 const getBookmarkedPosts = async (req, res, next) => {
@@ -961,6 +1042,19 @@ const getBookmarkedPosts = async (req, res, next) => {
     const userId = req.user.id;
     const { page = 1, limit = 10 } = req.query;
     const skip = (page - 1) * limit;
+
+    // Validate pagination parameters
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    
+    if (isNaN(pageNum)) {
+      return next(new HttpError(400, 'Invalid page parameter'));
+    }
+    
+    if (isNaN(limitNum)) {
+      return next(new HttpError(400, 'Invalid limit parameter'));
+    }
+
 
     // Get current user with bookmarks
     const currentUser = await UserModel.findById(userId)
@@ -971,23 +1065,34 @@ const getBookmarkedPosts = async (req, res, next) => {
       return next(new HttpError(404, 'User not found'));
     }
 
+    // Early exit if no bookmarks
+    if (currentUser.bookmarks.length === 0) {
+      return res.status(200).json({
+        page: pageNum,
+        limit: limitNum,
+        count: 0,
+        total: 0,
+        posts: []
+      });
+    }
+
     // Get bookmarked posts with pagination
     const posts = await PostModel.find({
       _id: { $in: currentUser.bookmarks },
-      deletedAt: null
+      deletedAt: null // Exclude soft-deleted posts
     })
     .populate('creator', 'userName fullName profilePhoto isPrivate')
     .populate('likes.user', 'userName fullName profilePhoto')
     .sort({ createdAt: -1 })
     .skip(skip)
-    .limit(parseInt(limit))
+    .limit(limitNum)
     .lean();
 
     // Early exit if no posts
     if (posts.length === 0) {
       return res.status(200).json({
-        page,
-        limit,
+        page: pageNum,
+        limit: limitNum,
         count: 0,
         total: currentUser.bookmarks.length,
         posts: []
@@ -1028,8 +1133,8 @@ const getBookmarkedPosts = async (req, res, next) => {
     });
 
     res.status(200).json({
-      page,
-      limit,
+      page: pageNum,
+      limit: limitNum,
       count: accessiblePosts.length,
       total: currentUser.bookmarks.length,
       posts: accessiblePosts
@@ -1037,6 +1142,41 @@ const getBookmarkedPosts = async (req, res, next) => {
   } catch (error) {
     console.error('Get Bookmarked Posts Error:', error);
     return next(new HttpError(500, 'Failed to fetch bookmarked posts'));
+  }
+};
+// ================= GET Trend =================
+const getTrendingTopics = async (req, res, next) => {
+  try {
+    // Get top 10 trending tags from last 7 days
+    const trendingTopics = await PostModel.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+          tags: { $exists: true, $ne: [] }
+        }
+      },
+      { $unwind: "$tags" },
+      {
+        $group: {
+          _id: "$tags",
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { count: -1 } },
+      { $limit: 10 },
+      {
+        $project: {
+          tag: "$_id",
+          count: 1,
+          _id: 0
+        }
+      }
+    ]);
+    
+    res.status(200).json(trendingTopics);
+  } catch (error) {
+    console.error("Trending Topics Error:", error);
+    return next(new HttpError(500, "Failed to fetch trending topics"));
   }
 };
 
@@ -1050,11 +1190,14 @@ module.exports = {
   sharePost,
   editPost,
   deletePost,
+  deletePostPermanently ,
+   getDeletedPosts,
   recoverPost,
   getPost,
   getAllPosts,
   getPostsByUser,
   bookmarkPost,
   getBookmarkedPosts,
-  removeBookmark
+  removeBookmark,
+  getTrendingTopics
 };

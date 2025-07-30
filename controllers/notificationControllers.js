@@ -11,9 +11,16 @@ const getUserNotifications = async (req, res, next) => {
 
     // Get notifications without populating first
     const notifications = await Notification.find({ user: userId })
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
+  .sort({ createdAt: -1 })
+  .skip(skip)
+  .limit(limit)
+  .populate([
+    { path: 'data.actor', select: 'userName fullName profilePhoto' },
+    { path: 'data.post', select: 'body image' },
+    { path: 'data.comment', select: 'text' },
+    { path: 'data.conversation', select: 'groupName isGroup' }
+  ]);
+
     
     // Extract IDs to mark as read
     const notificationIds = notifications.map(n => n._id);
@@ -27,16 +34,13 @@ const getUserNotifications = async (req, res, next) => {
     }
 
     // Now populate after marking as read
-    const populatedNotifications = await Notification.populate(notifications, [
-      {
-        path: 'data.actor',
-        select: 'userName fullName profilePhoto'
-      },
-      {
-        path: 'data.conversation',
-        select: 'isGroup groupName'
-      }
-    ]);
+    // In getNotifications
+        const populatedNotifications = await Notification.populate(notifications, [
+          { path: 'data.actor', select: 'userName fullName profilePhoto' },
+          { path: 'data.post', select: 'body image' },
+          { path: 'data.comment', select: 'text' },
+          { path: 'data.conversation', select: 'groupName' }
+        ]);
 
     // Format notifications
     const formattedNotifications = populatedNotifications.map(notification => {
@@ -84,10 +88,15 @@ const getUserNotifications = async (req, res, next) => {
 
     const total = await Notification.countDocuments({ user: userId });
 
+   const readCount = await Notification.countDocuments({ user: userId, read: true });
+    const unreadCount = total - readCount;
+
     res.status(200).json({
       page,
       limit,
       total,
+      readCount,
+      unreadCount,
       notifications: formattedNotifications
     });
   } catch (error) {
@@ -123,25 +132,27 @@ const markAsRead = async (req, res, next) => {
     }
 
     // Format message for response
-    let message = 'New notification';
-    const actorName = notification.data.actor?.userName || 'Someone';
-    
-    switch(notification.type) {
-      case 'like':
-        message = `${actorName} liked your post`;
-        break;
-      case 'comment':
-        message = `${actorName} commented on your post`;
-        break;
-      // ... other cases ...
-      default:
-        message = 'New notification';
-    }
-    
-    const response = {
-      ...notification.toObject(),
-      message
-    };
+      const actorName = notification?.data?.actor?.userName || 'Someone';
+
+      const typeMessages = {
+        like: `${actorName} liked your post`,
+        comment: `${actorName} commented on your post`,
+        follow: `${actorName} started following you`,
+        mention: `${actorName} mentioned you`,
+        message: notification.data.conversation?.isGroup
+          ? `New message in ${notification.data.conversation?.groupName || 'a group'}`
+          : `${actorName} sent you a message`,
+        tag: `${actorName} tagged you in a post`,
+        call: `${actorName} is calling you`
+      };
+
+      const message = typeMessages[notification.type] || 'New notification';
+
+      const response = {
+        ...notification.toObject(),
+        message
+      };
+
 
     res.status(200).json(response);
   } catch (error) {
@@ -149,8 +160,30 @@ const markAsRead = async (req, res, next) => {
     return next(new HttpError(500, 'Failed to mark notification as read'));
   }
 };
+const deleteNotification = async (req, res, next) => {
+  try {
+    const notificationId = req.params.id;
+    const userId = req.user.id;
 
+    const notification = await Notification.findOneAndDelete({
+      _id: notificationId,
+      user: userId
+    });
+
+    if (!notification) {
+      return next(new HttpError(404, 'Notification not found'));
+    }
+
+    res.status(200).json({ message: 'Notification deleted' });
+  } catch (error) {
+    console.error('Delete Notification Error:', error);
+    return next(new HttpError(500, 'Failed to delete notification'));
+  }
+};
+
+// Update exports
 module.exports = {
   getUserNotifications,
-  markAsRead
+  markAsRead,
+  deleteNotification 
 };

@@ -6,11 +6,16 @@ const uuid = require('uuid').v4;
 const mongoose = require('mongoose');
 const fs = require('fs');
 const path = require('path');
+const User = require('../models/userModel');
+const Post = require('../models/postModel')
+
 const cloudinary = require('../utils/cloudinary');
 const Activity = require('../models/activityModel');
 const ObjectId = require('mongoose').Types.ObjectId;
 const sendEmail  = require('../utils/emailSender');
 const crypto = require('crypto');
+const notifyUser  = require('../utils/notifyUser')
+const { getIO, getRedis } = require('../socket/socket');
 
 // Helper function for input sanitization
 const sanitizeInput = (input) => {
@@ -203,7 +208,7 @@ const loginUser = async (req, res, next) => {
         : { userName: identifier }
     );
 
-    if (!user) {
+    if (!user || !(await bcrypt.compare(password, user.password))) {
       return next(new HttpError(401, "Invalid credentials.")); // Generic for security
     }
 
@@ -223,9 +228,17 @@ const loginUser = async (req, res, next) => {
       expiresIn: process.env.JWT_EXPIRES_IN || '1h' 
     });
 
+    // Create refresh token (long-lived)
+    const refreshToken = jwt.sign(
+      { id: user._id }, 
+      process.env.REFRESH_TOKEN_SECRET,
+      { expiresIn: '7d' }
+    );
+
     res.status(200).json({
       message: "Login successful",
       token,
+      refreshToken,
       user: {
         id: user._id,
         userName: user.userName,
@@ -350,6 +363,21 @@ const resetPassword = async (req, res, next) => {
     return next(new HttpError(500, "Password reset failed."));
   }
 };
+// In userController.js
+const validateResetToken = async (req, res, next) => {
+    try {
+        const { token } = req.params;
+        
+        const user = await UserModel.findOne({
+            resetPasswordToken: token,
+            resetPasswordExpires: { $gt: Date.now() }
+        });
+
+        res.status(200).json({ valid: !!user });
+    } catch (error) {
+        next(new HttpError(500, "Token validation failed"));
+    }
+};
 
 // ================= GET CURRENT USER =================
 const getCurrentUser = async (req, res, next) => {
@@ -412,6 +440,32 @@ const getUserProfile = async (req, res, next) => {
     return next(new HttpError(500, "An error occurred while fetching the user."));
   }
 };
+const getUserById = async (req, res, next) => {
+  try {
+    const user = await UserModel.findById(req.params.id).select('-password');
+    if (!user) {
+      return next(new HttpError(404, 'User not found'));
+    }
+
+    res.status(200).json(user);
+  } catch (error) {
+    console.error('Get User By ID Error:', error);
+    return next(new HttpError(500, 'Failed to fetch user'));
+  }
+};
+
+
+const getUserPosts = async (req, res) => {
+  try {
+    const posts = await Post.find({ creator: req.params.id }) // not userId
+      .active()
+      .sort({ createdAt: -1 });
+    res.json(posts);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to get user posts' });
+  }
+};
 
 // ================= UPDATE USER =================
 const updateUser = async (req, res, next) => {
@@ -463,6 +517,14 @@ const updateUser = async (req, res, next) => {
       updateData,
       { new: true, runValidators: true }
     ).select("-password");
+
+    await Activity.create({
+    user: userId,
+    action: 'update_profile',
+    ipAddress: req.ip,
+    userAgent: req.headers['user-agent'],
+    details: { fields: Object.keys(updateData) }
+  });
 
     res.status(200).json(updatedUser);
   } catch (error) {
@@ -546,11 +608,18 @@ const followUser = async (req, res, next) => {
     }
 
     const targetUserId = targetUser._id;
-
-    // Validate self-follow
+      // Validate self-follow
     if (currentUserId === targetUserId.toString()) {
       return next(new HttpError(400, "Cannot follow yourself"));
     }
+    // In followUser controller
+    if (!targetUser.isPrivate) {
+      await notifyUser(targetUserId, 'follow', {
+        actor: currentUserId
+      });
+}
+
+  
 
     const currentUser = await UserModel.findById(currentUserId);
     
@@ -732,32 +801,30 @@ const unblockUser = async (req, res, next) => {
     const currentUserId = req.user.id;
     const targetUsername = req.params.username;
 
-    // Find target user
     const targetUser = await UserModel.findOne({ userName: targetUsername });
     if (!targetUser) {
       return next(new HttpError(404, "User not found."));
     }
 
-    const targetUserId = targetUser._id;
-
     const currentUser = await UserModel.findById(currentUserId);
-    
-    // Check if blocked
-    if (!currentUser.blockedUsers.includes(targetUserId)) {
-      return next(new HttpError(400, "User not blocked"));
+
+    // Check if actually blocked
+    if (!currentUser.blockedUsers.some(id => id.equals(targetUser._id))) {
+      return next(new HttpError(400, "User is not blocked."));
     }
 
-    // Unblock the user
+    // Unblock user
     await UserModel.findByIdAndUpdate(currentUserId, {
-      $pull: { blockedUsers: targetUserId }
+      $pull: { blockedUsers: targetUser._id }
     });
-    
-    return res.status(200).json({ message: "User unblocked successfully" });
+
+    return res.status(200).json({ message: "User unblocked successfully." });
   } catch (error) {
     console.error("Unblock Error:", error);
-    return next(new HttpError(500, "Unblock operation failed"));
+    return next(new HttpError(500, "Unblock operation failed: " + error.message));
   }
 };
+
 
 // ================= RESPOND TO FOLLOW REQUEST =================
 const respondToFollowRequest = async (req, res, next) => {
@@ -908,6 +975,15 @@ const deactivateAccount = async (req, res, next) => {
     user.deactivatedAt = Date.now();
     await user.save();
 
+    // Force logout via socket
+    const redisClient = getRedis();
+    const io = getIO();
+    const socketId = await redisClient.hget('online-users', userId);
+
+    if (socketId) {
+      io.to(socketId).emit('force-logout', 'Your account was deactivated.');
+    }
+
     res.status(200).json({ 
       message: "Account deactivated successfully",
       deactivatedUntil: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 30 days
@@ -918,6 +994,74 @@ const deactivateAccount = async (req, res, next) => {
   }
 };
 
+const getBlockedUsers = async (req, res, next) => {
+  try {
+    const user = await UserModel.findById(req.user.id)
+      .populate('blockedUsers', 'userName profilePhoto fullName');
+
+    return res.status(200).json({ blockedUsers: user.blockedUsers });
+  } catch (error) {
+    console.error('Error in getBlockedUsers:', error);
+    return next(new HttpError(500, 'Failed to fetch blocked users'));
+  }
+};
+
+
+// ================= REFRESH TOKEN =================
+// const refreshToken = async (req, res, next) => {
+//   try {
+//     const { token } = req.body;
+
+//     if (!token) {
+//       return next(new HttpError(400, "Refresh token is required"));
+//     }
+
+//     // Verify the token
+//     jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+//       if (err) {
+//         return next(new HttpError(403, "Invalid refresh token"));
+//       }
+
+//       // Generate new access token
+//       const newAccessToken = jwt.sign({ id: decoded.id }, process.env.JWT_SECRET, { 
+//         expiresIn: process.env.JWT_EXPIRES_IN || '1h' 
+//       });
+
+//       res.status(200).json({ accessToken: newAccessToken });
+//     });
+//   } catch (error) {
+//     console.error("Refresh Token Error:", error);
+//     return next(new HttpError(500, "Failed to refresh token"));
+//   }
+// };
+
+// ================= GET BOOKMARKED POSTS =================
+const getBookmarkedPosts = async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+
+    const user = await User.findById(userId)
+      .populate({
+        path: "bookmarks",
+        populate: { path: "creator", select: "userName fullName profilePhoto isPrivate blockedUsers" } // populate Creator inside each bookmarked post
+      })
+      .select(" bookmarks"); // get only bookmarks
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found." });
+    }
+
+    return res.status(200).json({ bookmarks: user.bookmarks });
+  } catch (error) {
+  
+    return res.status(500).json({ message: "Server error." });
+  }
+};
+
+
+
+
+
 // ================= EXPORTS =================
 module.exports = {
   registerUser,
@@ -925,6 +1069,7 @@ module.exports = {
   loginUser,
   forgotPassword,
   resetPassword,
+  validateResetToken,
   getCurrentUser,
   getUserProfile,
   updateUser,
@@ -936,5 +1081,10 @@ module.exports = {
   respondToFollowRequest,
   getSuggestedUsers,
   searchUsers,
-  deactivateAccount
+  deactivateAccount,
+  getUserById,
+  getBookmarkedPosts,
+ getBlockedUsers,
+ getUserPosts
+
 };

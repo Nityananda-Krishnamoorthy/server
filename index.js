@@ -14,10 +14,20 @@ const app = express();
 app.use(cors({ origin: process.env.CLIENT_URL, credentials: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(upload());
+app.use(upload({
+  useTempFiles: true,
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit
+  createParentPath: true
+}));
 // Initialize online users set
 app.locals.onlineUsers = new Set();
-
+  app.use((req, res, next) => {
+  console.log("INCOMING REQUEST:", req.method, req.originalUrl);
+  console.log("Params:", req.params);
+  console.log("Body:", req.body);
+  console.log("User:", req.user);
+  next();
+});
 // Create Redis clients with error handlers
 let pubClient, subClient;
 

@@ -20,6 +20,6 @@ module.exports = [
   'spam',
   'nsfw',
   'explicit',
-  'pornography'
-  // Add more words as needed
+  'pornography',
+
 ];

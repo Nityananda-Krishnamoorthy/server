@@ -13,13 +13,16 @@ const {
   sharePost,
   editPost,
   deletePost,
+  deletePostPermanently ,
+  getDeletedPosts,
   recoverPost,
   getPost,
   getAllPosts,
   getPostsByUser,
   bookmarkPost,
   getBookmarkedPosts,
-  removeBookmark
+  removeBookmark,
+  getTrendingTopics
 } = require('../controllers/postControllers');
 
 // Create Post
@@ -28,25 +31,31 @@ router.post('/', authMiddleware, createPost);
 // Get Posts
 router.get('/', authMiddleware, getAllPosts);
 router.get('/user/:username', authMiddleware, getPostsByUser);
-router.get('/bookmarks', authMiddleware, getBookmarkedPosts);
+router.post('/:id/bookmarks',authMiddleware, bookmarkPost);
+router.delete('/:id/bookmarks',authMiddleware, removeBookmark);
 
-// Apply visibility middleware to all post ID routes
-router.use('/:id', authMiddleware, checkPostVisibility);
+// Add this route
+router.get('/trending', authMiddleware, getTrendingTopics);
+router.get('/deleted/list',authMiddleware, getDeletedPosts);
 
 // Post ID routes (protected by visibility check)
-router.get('/:id', getPost);
-router.patch('/:id', editPost);
-router.delete('/:id', deletePost);
-router.patch('/:id/recover', recoverPost);
-router.post('/:id/like', likePost);
-router.delete('/:id/like', unlikePost);
-router.post('/:id/comments', addComment);
-router.post('/:id/share', sharePost);
-router.post('/:id/bookmarks', bookmarkPost);
-router.delete('/:id/bookmarks', removeBookmark);
+router.get('/:id',authMiddleware, checkPostVisibility, getPost);
+router.patch('/:id',authMiddleware, checkPostVisibility, editPost);
+router.delete('/:id', authMiddleware, checkPostVisibility,deletePost);
+router.delete('/:id/permanent', authMiddleware, checkPostVisibility, deletePostPermanently);
+
+
+
+
+router.patch('/:id/recover',authMiddleware, checkPostVisibility, recoverPost);
+router.post('/:id/like',authMiddleware, checkPostVisibility, likePost);
+router.delete('/:id/like',authMiddleware, checkPostVisibility, unlikePost);
+router.post('/:id/comments',authMiddleware, checkPostVisibility, addComment);
+router.post('/:id/share',authMiddleware, checkPostVisibility,sharePost);
+
 
 // Comments routes (need to adjust to include post ID)
-router.patch('/:id/comments/:commentId', editComment);
-router.delete('/:id/comments/:commentId', deleteComment);
+router.patch('/:id/comments/:commentId',authMiddleware, checkPostVisibility, editComment);
+router.delete('/:id/comments/:commentId',authMiddleware, checkPostVisibility, deleteComment);
 
 module.exports = router;

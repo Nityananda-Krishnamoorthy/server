@@ -1,16 +1,19 @@
-const Notification = require('../models/NotificationModel'); // or your schema path
+const Notification = require('../models/notificationModel');
+const { getIO } = require('../socket/socket');
 
 const notifyUser = async (userId, type, data) => {
   try {
-    const notification = new Notification({
+    const notification = await Notification.create({
       user: userId,
-      type,         // e.g. 'follow', 'comment', 'like'
-      data,         // { userId: '...', postId: '...', etc. }
+      type,
+      data,       
       read: false,
-      createdAt: new Date()
+      timestamp: new Date()
     });
 
-    await notification.save();
+     // Deliver via socket.io
+    const io = getIO();
+    io.to(`user_${userId}`).emit('new-notification', notification);
   } catch (err) {
     console.error('Failed to notify user:', err.message);
   }

@@ -6,7 +6,9 @@ const callSchema = new Schema({
     user: { type: Schema.Types.ObjectId, ref: 'User', required: true },
     joinedAt: { type: Date },
     leftAt: { type: Date }
-  }],
+  },
+],
+
   initiator: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   type: { type: String, enum: ['audio', 'video'], required: true },
   status: { 

@@ -7,7 +7,7 @@ const userSchema = new Schema({
   password: { type: String, required: true },
   profilePhoto: {
     type: String,
-    default: "https://res.cloudinary.com/dydb9kwzu/image/upload/v1752883837/Profile_Picture_Avatar_zkftw4.png"
+    default: "https://res.cloudinary.com/dydb9kwzu/image/upload/v1753545932/User_Icon_qs3ute.png"
   },
   bio: {
     type: String,

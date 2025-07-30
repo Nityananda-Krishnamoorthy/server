@@ -1,21 +1,26 @@
 const jwt = require("jsonwebtoken");
 const HttpError = require("../models/errorModel");
+const User = require("../models/userModel");
 
 const authMiddleware = async (req, res, next) => {
-  const Authorization = req.headers.Authorization || req.headers.authorization;
+  const authHeader = req?.headers?.authorization || req?.headers?.Authorization;
 
-  if (Authorization && Authorization.startsWith("Bearer ")) {
-    const token = Authorization.split(" ")[1];
-
-    jwt.verify(token, process.env.JWT_SECRET, (err, info) => {
-      if (err) {
-        return next(new HttpError(401, "Invalid or expired token."));
-      }
-      req.user = info; // Attach user info to request
-      next();
-    });
-  } else {
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return next(new HttpError(401, "You are not authorized to access this route."));
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded?.id).select("-password");
+    if (!user) return next(new HttpError(404, "User not found"));
+
+    req.user = user;
+    next();
+  } catch (err) {
+    console.error("authMiddleware error:", err.message);
+    return next(new HttpError(401, "Invalid or expired token."));
   }
 };
 

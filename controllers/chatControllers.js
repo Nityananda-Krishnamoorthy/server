@@ -84,8 +84,18 @@ const updateMessageStatus = async (messageId, userId, status) => {
 // ================= START CONVERSATION =================
 const startConversation = async (req, res, next) => {
   try {
-    const { participants, isGroup, groupName } = req.body;
+    const { isGroup, groupName } = req.body;
     const userId = req.user.id;
+    let participants = req.body.participants;
+
+    // If it's a string like '["id1","id2"]', parse it
+    if (typeof participants === 'string') {
+      try {
+        participants = JSON.parse(participants);
+      } catch {
+        return next(new HttpError(400, 'Participants must be an array'));
+      }
+    }
 
     // Validate participants
     if (!participants || !Array.isArray(participants)) {
@@ -96,11 +106,11 @@ const startConversation = async (req, res, next) => {
     const validParticipants = participants.filter(id => 
       mongoose.Types.ObjectId.isValid(id)
     );
-    
+console.log("Validated participants:", validParticipants);
     if (validParticipants.length !== participants.length) {
       return next(new HttpError(400, 'Contains invalid participant IDs'));
     }
-
+console.log("Checking if users exist...");
     // Verify participants exist
     const usersExist = await UserModel.countDocuments({
       _id: { $in: validParticipants }
@@ -114,7 +124,8 @@ const startConversation = async (req, res, next) => {
     const allParticipants = [
       ...new Set([userId, ...validParticipants])
     ].map(id => new mongoose.Types.ObjectId(id));
-
+console.log("All participants to be saved:", allParticipants);
+console.log("Saving new conversation...");
     // Validate participant count
     if (!isGroup && allParticipants.length !== 2) {
       return next(new HttpError(400, '1:1 conversation requires exactly 2 participants'));
@@ -350,7 +361,7 @@ const startVideoCall = async (req, res, next) => {
   try {
     const { conversationId, type } = req.body;
     const userId = req.user.id;
-    const redisClient = req.app.locals.redisClient; // Get Redis client
+    const redisClient = req.app.locals.redisClient;
 
     // Validate conversation
     const conversation = await Conversation.findById(conversationId);
@@ -358,19 +369,26 @@ const startVideoCall = async (req, res, next) => {
       return next(new HttpError(404, 'Conversation not found'));
     }
 
+    // Check if user is participant
     if (!conversation.participants.some(id => id.equals(userId))) {
       return next(new HttpError(403, 'Not a participant'));
     }
 
-    // Get participant IDs
-    const participantIds = conversation.participants.map(id => id.toString());
+    // Create properly structured participants array
+    const participants = conversation.participants.map(id => ({
+      user: id,
+      // Add timestamps only when user actually joins
+      joinedAt: id.equals(userId) ? new Date() : undefined
+    }));
 
     // Create call record
     const newCall = new Call({
-      participants: conversation.participants.map(id => ({ user: id })),
+      participants,
       initiator: userId,
       type: type || 'video',
-      status: 'initiated'
+      status: 'initiated',
+      // Set startedAt only when call actually begins
+      startedAt: undefined
     });
 
     await newCall.save();
@@ -388,10 +406,11 @@ const startVideoCall = async (req, res, next) => {
     conversation.lastMessage = callMessage._id;
     await conversation.save();
 
-    // Store participants in Redis
+    // Store participant IDs in Redis for signaling
+    const participantIds = conversation.participants.map(id => id.toString());
     await redisClient.sadd(`call:${newCall._id}:participants`, ...participantIds);
 
-    // Notify participants
+    // Notify participants (implementation not shown)
     await notifyParticipants(conversationId, callMessage._id, userId, 'call');
 
     res.status(201).json({ 
