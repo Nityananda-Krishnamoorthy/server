@@ -1,6 +1,6 @@
 const PostModel = require('../models/postModel');
 const UserModel = require('../models/userModel');
-const Notification = require('../models/notificationModel');
+const Notification = require('../models/NotificationModel');
 const HttpError = require('../models/errorModel');
 const notifyUser = require('../utils/notifyUser');
 const uuid = require('uuid').v4;

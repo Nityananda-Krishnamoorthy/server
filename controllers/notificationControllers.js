@@ -1,4 +1,4 @@
-const Notification = require('../models/notificationModel');
+const Notification = require('../models/NotificationModel');
 const HttpError = require('../models/errorModel');
 
 // ================= GET USER NOTIFICATIONS =================

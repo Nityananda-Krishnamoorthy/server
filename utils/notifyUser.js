@@ -1,4 +1,4 @@
-const Notification = require('../models/notificationModel');
+const Notification = require('../models/NotificationModel');
 const { getIO } = require('../socket/socket');
 
 const notifyUser = async (userId, type, data) => {

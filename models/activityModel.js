@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 const { Schema } = mongoose;
-const { notifyUser } = require('./notificationModel'); // Import notification helper
+const { notifyUser } = require('./NotificationModel'); // Import notification helper
 
 const activitySchema = new Schema({
   user: { type: Schema.Types.ObjectId, ref: 'User', required: true },
