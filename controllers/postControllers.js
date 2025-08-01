@@ -750,15 +750,16 @@ const getPost = async (req, res, next) => {
     // Use lean() for read-only operation
     const post = await PostModel.findById(postId)
       .populate('creator', 'userName fullName profilePhoto isPrivate')
-      .populate('likes.user', 'userName fullName profilePhoto')
-      .populate('comments.user', 'userName fullName profilePhoto')
-      .populate('shares.user', 'userName fullName profilePhoto')
+      .populate('likes', 'userName fullName profilePhoto')
+      .populate('comments', 'userName fullName profilePhoto')
+      .populate('shares', 'userName fullName profilePhoto')
+      .populate('bookmarks', 'userName fullName profilePhoto')
       .populate({
         path: 'originalPost',
         select: 'creator body image',
         populate: { 
           path: 'creator', 
-          select: 'userName fullName profilePhoto' 
+          select: 'userName fullName profilePhoto likes bookmarks' 
         }
       })
       .lean();
@@ -964,37 +965,36 @@ const getPostsByUser = async (req, res, next) => {
   }
 };
 
+// postControllers.js
 // ================= BOOKMARK POST =================
 const bookmarkPost = async (req, res, next) => {
   try {
     const postId = req.params.id;
-    const userId = req.user.id;
+    const userId = req.user.id; // Ensure this matches authMiddleware
 
     const post = await PostModel.findById(postId);
     if (!post) return next(new HttpError(404, "Post not found"));
 
-    const user = await UserModel.findById(userId);
-    if (!user) return next(new HttpError(404, "User not found"));
-
-    if (user.bookmarks?.some(bm => bm.toString() === postId)) {
-      return next(new HttpError(400, "Post already bookmarked"));
+    // Check if already bookmarked
+    if (post.bookmarks.some(id => id.toString() === userId)) {
+      return res.status(200).json({
+        message: "Post already bookmarked",
+        bookmarks: post.bookmarks
+      });
     }
 
-    user.bookmarks.push(postId);
-    await user.save();
+    // Update both post and user
+    post.bookmarks.push(userId);
+    await post.save();
+    
+    await UserModel.findByIdAndUpdate(userId, {
+      $addToSet: { bookmarks: postId }
+    });
 
     res.status(200).json({
       message: "Post bookmarked",
-      isBookmarked: true,
-      postId
+      bookmarks: post.bookmarks
     });
-
-    notifyParticipants("bookmark", [userId], {
-      actor: userId,
-      postId,
-      isGroup: false
-    }).catch(console.error);
-
   } catch (error) {
     console.error("Bookmark Post Error:", error);
     return next(new HttpError(500, "Failed to bookmark post"));
@@ -1005,30 +1005,35 @@ const bookmarkPost = async (req, res, next) => {
 const removeBookmark = async (req, res, next) => {
   try {
     const postId = req.params.id;
-    const userId = req.user.id;
+    const userId = req.user.id; // Ensure this matches authMiddleware
 
-    const user = await UserModel.findById(userId);
-    if (!user) {
-      return next(new HttpError(404, 'User not found'));
+    const post = await PostModel.findById(postId);
+    if (!post) return next(new HttpError(404, 'Post not found'));
+
+    // Check if bookmarked
+    const bookmarkIndex = post.bookmarks.findIndex(
+      id => id.toString() === userId
+    );
+    
+    if (bookmarkIndex === -1) {
+      return res.status(200).json({ 
+        message: 'Post not bookmarked',
+        bookmarks: post.bookmarks
+      });
     }
 
-    const index = user.bookmarks.findIndex(bm => bm?.toString() === postId);
-    if (index === -1) {
-      return next(new HttpError(400, 'Post not bookmarked'));
-    }
+    // Update both post and user
+    post.bookmarks.splice(bookmarkIndex, 1);
+    await post.save();
+    
+    await UserModel.findByIdAndUpdate(userId, {
+      $pull: { bookmarks: postId }
+    });
 
-    user.bookmarks.splice(index, 1);
-    await user.save();
-
-    res.status(200).json({ message: 'Bookmark removed', postId });
-
-    // Optional: Notify (non-blocking)
-    notifyParticipants('remove_bookmark', [userId], {
-      actor: userId,
-      postId,
-      isGroup: false
-    }).catch(console.error);
-
+    res.status(200).json({ 
+      message: 'Bookmark removed',
+      bookmarks: post.bookmarks
+    });
   } catch (error) {
     console.error('Remove Bookmark Error:', error);
     return next(new HttpError(500, 'Failed to remove bookmark'));
@@ -1082,7 +1087,7 @@ const getBookmarkedPosts = async (req, res, next) => {
       deletedAt: null // Exclude soft-deleted posts
     })
     .populate('creator', 'userName fullName profilePhoto isPrivate')
-    .populate('likes.user', 'userName fullName profilePhoto')
+    .populate('likes', 'userName fullName profilePhoto')
     .sort({ createdAt: -1 })
     .skip(skip)
     .limit(limitNum)

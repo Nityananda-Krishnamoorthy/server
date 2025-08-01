@@ -19,6 +19,7 @@ const {
   blockUser,
   unblockUser,
   respondToFollowRequest,
+  getFollowRequests,
   getSuggestedUsers,
   searchUsers,
   deactivateAccount,
@@ -49,7 +50,10 @@ router.get('/:id/posts', authMiddleware, getUserPosts);
 router.get('/:username', authMiddleware, getUserProfile);
 // router.get('/', authMiddleware, getUsers);
 // Route
-router.get('/blocked-users', authMiddleware, getBlockedUsers);
+router.get('/me/blocked-users', authMiddleware, getBlockedUsers);
+// In your routes file (e.g., userRoutes.js)
+router.get('/me/pending-requests', authMiddleware, getFollowRequests);
+router.post('/:username/follow-requests', authMiddleware, respondToFollowRequest);
 
 
 
@@ -62,7 +66,7 @@ router.post('/:username/follow', authMiddleware, followUser);
 router.delete('/:username/follow', authMiddleware, unfollowUser);
 router.post('/:username/block', authMiddleware, blockUser);
 router.delete('/:username/block', authMiddleware, unblockUser);
-router.post('/:username/follow-requests', authMiddleware, respondToFollowRequest);
+
 //refresh token route
 router.post('/refresh-token', authMiddleware, refreshToken);
 

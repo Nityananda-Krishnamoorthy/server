@@ -32,7 +32,9 @@ const conversationSchema = new Schema({
   mutedBy: [{
     type: Schema.Types.ObjectId,
     ref: 'User'
-  }]
+  }],
+  deletedBy: [{ type: Schema.Types.ObjectId, ref: 'User' }]
+
 }, {
   timestamps: true,
   toJSON: { virtuals: true }

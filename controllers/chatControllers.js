@@ -180,20 +180,27 @@ const sendMessage = async (req, res, next) => {
     const { conversationId, text } = req.body;
     const userId = req.user.id;
 
-    // Validate conversation
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return next(new HttpError(400, 'Invalid conversation ID'));
+    }
+
     const conversation = await Conversation.findById(conversationId);
     if (!conversation) {
       return next(new HttpError(404, 'Conversation not found'));
     }
 
-    // Check if user is participant
     if (!conversation.participants.some(id => id.equals(userId))) {
       return next(new HttpError(403, 'Not a participant in this conversation'));
     }
 
-    let mediaUrls = [];
-    // Handle media uploads
+    const mediaUrls = [];
+
     if (req.files && req.files.length > 0) {
+      const uploadDir = path.join(__dirname, '../uploads');
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir, { recursive: true });
+      }
+
       const allowedTypes = [
         'image/jpeg', 
         'image/png', 
@@ -202,19 +209,21 @@ const sendMessage = async (req, res, next) => {
         'video/webm',
         'audio/mpeg'
       ];
-      
       for (const file of req.files) {
-        // Validate file type
         if (!allowedTypes.includes(file.mimetype)) {
           return next(new HttpError(400, 'Invalid file type'));
         }
-        
-        const tempFilePath = path.join(__dirname, '../uploads', `${uuid()}-${file.name}`);
+
+        const tempFilePath = path.join(uploadDir, `${uuid()}-${file.name}`);
+
         try {
           await file.mv(tempFilePath);
+
           const result = await cloudinary.uploader.upload(tempFilePath, {
-            folder: 'chat_media'
+            folder: 'chat_media',
+            resource_type: 'auto'
           });
+
           mediaUrls.push(result.secure_url);
         } catch (uploadError) {
           console.error('Upload error:', uploadError);
@@ -227,7 +236,6 @@ const sendMessage = async (req, res, next) => {
       }
     }
 
-    // Create message
     const newMessage = new Message({
       conversationId,
       senderId: userId,
@@ -237,12 +245,11 @@ const sendMessage = async (req, res, next) => {
 
     await newMessage.save();
 
-    // Update conversation last message
     conversation.lastMessage = newMessage._id;
     await conversation.save();
 
-    // Mark as delivered for online users
-    const onlineUsers = req.app.locals.onlineUsers;
+    const onlineUsers = req.app.locals.onlineUsers || new Map();
+
     conversation.participants.forEach(participantId => {
       const participantStr = participantId.toString();
       if (participantStr !== userId && onlineUsers.has(participantStr)) {
@@ -250,7 +257,6 @@ const sendMessage = async (req, res, next) => {
       }
     });
 
-    // Notify participants
     await notifyParticipants(conversationId, newMessage._id, userId, 'message');
 
     res.status(201).json(newMessage);
@@ -260,7 +266,30 @@ const sendMessage = async (req, res, next) => {
   }
 };
 
-// ================= GET CONVERSATIONS =================
+// ========== DELETE CONVERSATION ==========
+const deleteConversation = async (req, res, next) => {
+  try {
+    const conversationId = req.params.id;
+    const userId = req.user.id;
+
+    const conversation = await Conversation.findById(conversationId);
+    if (!conversation) {
+      return next(new HttpError(404, 'Conversation not found'));
+    }
+
+    if (!conversation.deletedBy.includes(userId)) {
+      conversation.deletedBy.push(userId);
+      await conversation.save();
+    }
+
+    res.status(200).json({ message: 'Conversation deleted' });
+  } catch (error) {
+    console.error('Delete Conversation Error:', error);
+    return next(new HttpError(500, 'Failed to delete conversation'));
+  }
+};
+
+// ========== GET CONVERSATIONS ==========
 const getConversations = async (req, res, next) => {
   try {
     const userId = req.user.id;
@@ -268,7 +297,10 @@ const getConversations = async (req, res, next) => {
     const limit = parseInt(req.query.limit) || 20;
     const skip = (page - 1) * limit;
 
-    const conversations = await Conversation.find({ participants: userId })
+    const conversations = await Conversation.find({
+      participants: userId,
+      deletedBy: { $ne: userId },
+    })
       .populate({
         path: 'participants',
         select: 'userName fullName profilePhoto'
@@ -282,7 +314,6 @@ const getConversations = async (req, res, next) => {
       .limit(limit)
       .lean();
 
-    // Add unread count for each conversation
     for (const conv of conversations) {
       conv.unreadCount = await Message.countDocuments({
         conversationId: conv._id,
@@ -291,7 +322,10 @@ const getConversations = async (req, res, next) => {
       });
     }
 
-    const total = await Conversation.countDocuments({ participants: userId });
+    const total = await Conversation.countDocuments({
+      participants: userId,
+      deletedBy: { $ne: userId }
+    });
 
     res.status(200).json({
       page,
@@ -305,6 +339,38 @@ const getConversations = async (req, res, next) => {
   }
 };
 
+// ========== GET CONVERSATION BY ID ==========
+const getConversation = async (req, res, next) => {
+  try {
+    const conversationId = req.params.id;
+    const userId = req.user.id;
+
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return next(new HttpError(400, 'Invalid conversation ID'));
+    }
+
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      participants: userId,
+      deletedBy: { $ne: userId },
+    })
+      .populate('participants', 'userName fullName profilePhoto isOnline lastSeen')
+      .populate('lastMessage');
+
+    if (!conversation) {
+      return next(new HttpError(404, 'Conversation not found'));
+    }
+
+    res.status(200).json(conversation);
+  } catch (error) {
+    console.error('Get Conversation Error:', error);
+    return next(new HttpError(500, 'Failed to get conversation'));
+  }
+};
+
+
+
+
 // ================= GET MESSAGES =================
 const getMessages = async (req, res, next) => {
   try {
@@ -314,6 +380,9 @@ const getMessages = async (req, res, next) => {
     const limit = parseInt(req.query.limit) || 50;
     const skip = (page - 1) * limit;
 
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return next(new HttpError(400, 'Invalid conversation ID'));
+    }
     // Validate conversation
     const conversation = await Conversation.findById(conversationId);
     if (!conversation) {
@@ -362,6 +431,10 @@ const startVideoCall = async (req, res, next) => {
     const { conversationId, type } = req.body;
     const userId = req.user.id;
     const redisClient = req.app.locals.redisClient;
+
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return next(new HttpError(400, 'Invalid conversation ID'));
+    }
 
     // Validate conversation
     const conversation = await Conversation.findById(conversationId);
@@ -460,7 +533,9 @@ const updateCallStatus = async (req, res, next) => {
 module.exports = {
   startConversation,
   sendMessage,
+  deleteConversation,
   getConversations,
+  getConversation,
   getMessages,
   startVideoCall,
   updateCallStatus,

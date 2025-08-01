@@ -67,9 +67,31 @@ function socketHandler(io, redisClient) {
       });
 
       // Message status updates
+      // socket.on('message-delivered', async (messageId) => {
+      //   await updateMessageStatus(messageId, socket.user._id, 'delivered');
+      // });
       socket.on('message-delivered', async (messageId) => {
-        await updateMessageStatus(messageId, socket.user._id, 'delivered');
+  try {
+    const updatedMessage = await updateMessageStatus(
+      messageId, 
+      socket.user._id, 
+      'delivered'
+    );
+    
+    if (updatedMessage) {
+      // Notify sender about delivery
+      io.to(conversationId).emit('message-status-update', {
+        messageId,
+        updates: { 
+          status: updatedMessage.status,
+          deliveredTo: updatedMessage.deliveredTo 
+        }
       });
+    }
+  } catch (error) {
+    console.error('Message delivery update error:', error);
+  }
+});
 
       socket.on('message-seen', async (messageId) => {
         await updateMessageStatus(messageId, socket.user._id, 'seen');

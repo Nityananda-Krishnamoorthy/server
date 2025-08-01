@@ -639,6 +639,7 @@ const followUser = async (req, res, next) => {
 
     // Handle private accounts
     if (targetUser.isPrivate) {
+      // Add to target user's pending followers
       await UserModel.findByIdAndUpdate(targetUserId, {
         $addToSet: { pendingFollowers: currentUserId }
       });
@@ -753,18 +754,18 @@ const blockUser = async (req, res, next) => {
     
     try {
       // Update current user
-      await UserModel.findByIdAndUpdate(
-        currentUserIdObj,
-        {
-          $addToSet: { blockedUsers: targetUserIdObj },
-          $pull: { 
-            following: targetUserIdObj,
-            followers: targetUserIdObj,
-            pendingFollowers: targetUserIdObj
-          }
-        },
-        { session }
-      );
+        await UserModel.findByIdAndUpdate(
+          currentUserIdObj,
+          {
+            $addToSet: { blockedUsers: targetUserIdObj },
+            $pull: { 
+              following: targetUserIdObj,
+              followers: targetUserIdObj,
+              pendingFollowers: targetUserIdObj  // Add this line
+            }
+          },
+          { session }
+        );
       
       // Update target user
       await UserModel.findByIdAndUpdate(
@@ -815,7 +816,10 @@ const unblockUser = async (req, res, next) => {
 
     // Unblock user
     await UserModel.findByIdAndUpdate(currentUserId, {
-      $pull: { blockedUsers: targetUser._id }
+      $pull: { 
+        blockedUsers: targetUser._id,
+        pendingFollowers: targetUser._id  
+      }
     });
 
     return res.status(200).json({ message: "User unblocked successfully." });
@@ -824,6 +828,24 @@ const unblockUser = async (req, res, next) => {
     return next(new HttpError(500, "Unblock operation failed: " + error.message));
   }
 };
+// getFollowRequests
+const getFollowRequests = async (req, res, next) => {
+  try {
+    const currentUserId = req.user.id;
+    
+    // Find users who have current user in their pendingFollowers
+    const requests = await UserModel.find({
+      pendingFollowers: currentUserId
+    }).select('userName fullName profilePhoto');
+    
+    res.status(200).json(requests);
+  } catch (error) {
+    console.error("Get Follow Requests Error:", error);
+    return next(new HttpError(500, "Failed to fetch follow requests"));
+  }
+};
+
+
 
 
 // ================= RESPOND TO FOLLOW REQUEST =================
@@ -831,44 +853,40 @@ const respondToFollowRequest = async (req, res, next) => {
   try {
     const currentUserId = req.user.id;
     const requesterUsername = req.params.username;
-    const { action } = req.body; // 'accept' or 'reject'
+    const { action } = req.body;
 
-    // Find requester user
-    const requesterUser = await UserModel.findOne({ userName: requesterUsername });
-    if (!requesterUser) {
-      return next(new HttpError(404, "User not found."));
-    }
-    
-    const requesterId = requesterUser._id;
+    const requester = await UserModel.findOne({ userName: requesterUsername });
+    if (!requester) return next(new HttpError(404, "User not found"));
+
     const currentUser = await UserModel.findById(currentUserId);
     
-    // Check for pending request
-    if (!currentUser.pendingFollowers.includes(requesterId)) {
+    if (!currentUser.pendingFollowers.includes(requester._id)) {
       return next(new HttpError(400, "No pending request from this user"));
     }
 
-    // Handle accept/reject
     if (action === 'accept') {
+      // Update both users
       await UserModel.findByIdAndUpdate(currentUserId, {
-        $pull: { pendingFollowers: requesterId },
-        $addToSet: { followers: requesterId }
+        $pull: { pendingFollowers: requester._id },
+        $addToSet: { followers: requester._id }
       });
       
-      await UserModel.findByIdAndUpdate(requesterId, {
+      await UserModel.findByIdAndUpdate(requester._id, {
         $addToSet: { following: currentUserId }
       });
-      
+
       return res.status(200).json({ message: "Follow request accepted" });
     } 
     
     if (action === 'reject') {
       await UserModel.findByIdAndUpdate(currentUserId, {
-        $pull: { pendingFollowers: requesterId }
+        $pull: { pendingFollowers: requester._id }
       });
+      
       return res.status(200).json({ message: "Follow request rejected" });
     }
     
-    return next(new HttpError(400, "Invalid action specified"));
+    return next(new HttpError(400, "Invalid action"));
   } catch (error) {
     console.error("Follow Request Error:", error);
     return next(new HttpError(500, "Request processing failed"));
@@ -1079,6 +1097,7 @@ module.exports = {
   blockUser,
   unblockUser,
   respondToFollowRequest,
+  getFollowRequests,
   getSuggestedUsers,
   searchUsers,
   deactivateAccount,

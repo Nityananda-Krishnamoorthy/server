@@ -4,7 +4,9 @@ const authMiddleware = require('../middleware/authMiddleware');
 const {
   startConversation,
   sendMessage,
+  deleteConversation,
   getConversations,
+  getConversation,
   getMessages,
   startVideoCall,
   updateCallStatus
@@ -14,9 +16,11 @@ const upload = require('../middleware/multer');
 // Conversation routes
 router.post('/conversations', authMiddleware, startConversation);
 router.get('/conversations', authMiddleware, getConversations);
+router.delete('/conversations/:id', authMiddleware, deleteConversation)
 
 // Message routes
 router.post('/messages', authMiddleware, upload.array('media', 10), sendMessage);
+router.get('/conversations/:id', authMiddleware, getConversation); 
 router.get('/conversations/:id/messages', authMiddleware, getMessages);
 
 // Call routes
