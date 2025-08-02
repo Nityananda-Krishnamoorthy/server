@@ -404,13 +404,13 @@ const getUserProfile = async (req, res, next) => {
     const currentUserId = req.user.id;
 
     // Validate username
-    if (!username || !/^[a-zA-Z0-9_]+$/.test(username)) {
-      return next(new HttpError(400, "Invalid username format."));
+    if (!username) {
+      return next(new HttpError(400, "Username is required."));
     }
 
-    // Fetch user WITHOUT excluding blockedUsers (needed for checks)
+    // Fetch user by username
     const user = await UserModel.findOne({ userName: username })
-      .select("-password")  // Removed blockedUsers exclusion
+      .select("-password -blockedUsers")
       .populate('followers following', 'userName fullName profilePhoto');
 
     if (!user) {
@@ -418,23 +418,17 @@ const getUserProfile = async (req, res, next) => {
     }
 
     // Check block status
-    if (user.blockedUsers.includes(currentUserId)) {
+    if (user.blockedUsers && user.blockedUsers.includes(currentUserId)) {
       return next(new HttpError(403, "You are blocked by this user"));
     }
 
     // Optimize: fetch only blockedUsers for current user
     const currentUser = await UserModel.findById(currentUserId).select('blockedUsers');
-    if (currentUser.blockedUsers.includes(user._id)) {
+    if (currentUser.blockedUsers && currentUser.blockedUsers.includes(user._id)) {
       return next(new HttpError(403, "You have blocked this user"));
     }
 
-    // Convert to plain JS object and remove sensitive fields
-    const userObject = user.toObject();
-    delete userObject.blockedUsers;  // Remove before sending
-
-
-    
-    res.status(200).json(userObject);
+    res.status(200).json(user);
   } catch (error) {
     console.error("Error fetching user:", error);
     return next(new HttpError(500, "An error occurred while fetching the user."));
@@ -854,6 +848,10 @@ const respondToFollowRequest = async (req, res, next) => {
     const currentUserId = req.user.id;
     const requesterUsername = req.params.username;
     const { action } = req.body;
+console.log("Action:", action);
+console.log("Requester:", requesterUsername);
+
+
 
     const requester = await UserModel.findOne({ userName: requesterUsername });
     if (!requester) return next(new HttpError(404, "User not found"));
@@ -863,30 +861,39 @@ const respondToFollowRequest = async (req, res, next) => {
     if (!currentUser.pendingFollowers.includes(requester._id)) {
       return next(new HttpError(400, "No pending request from this user"));
     }
+console.log("Requester ID:", requester?._id);
+console.log("Current User ID:", currentUserId);
+console.log("Pending followers:", currentUser?.pendingFollowers);
+
+
 
     if (action === 'accept') {
       // Update both users
-      await UserModel.findByIdAndUpdate(currentUserId, {
-        $pull: { pendingFollowers: requester._id },
-        $addToSet: { followers: requester._id }
-      });
-      
-      await UserModel.findByIdAndUpdate(requester._id, {
-        $addToSet: { following: currentUserId }
-      });
+    await UserModel.findByIdAndUpdate(currentUserId, {
+      $pull: { pendingFollowers: requester._id },
+      $addToSet: { followers: requester._id }
+    });
+    await UserModel.findByIdAndUpdate(requester._id, {
+      $addToSet: { following: currentUserId }
+    });
+
 
       return res.status(200).json({ message: "Follow request accepted" });
     } 
     
     if (action === 'reject') {
       await UserModel.findByIdAndUpdate(currentUserId, {
-        $pull: { pendingFollowers: requester._id }
-      });
+      $pull: { pendingFollowers: requester._id }
+    });
       
       return res.status(200).json({ message: "Follow request rejected" });
     }
+
+
     
     return next(new HttpError(400, "Invalid action"));
+
+
   } catch (error) {
     console.error("Follow Request Error:", error);
     return next(new HttpError(500, "Request processing failed"));

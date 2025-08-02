@@ -15,15 +15,26 @@ const storySchema = new mongoose.Schema({
     enum: ['image', 'video'],
     required: true
   },
+  duration: {
+    type: Number,
+    default: 7 // seconds per story
+  },
   viewers: [{
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    viewedAt: Date
+  }],
+  reactions: [{
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    emoji: String,
+    reactedAt: Date
   }],
   createdAt: {
     type: Date,
     default: Date.now,
     expires: 86400 // 24 hours in seconds
   }
+}, {
+  timestamps: true
 });
 
 module.exports = mongoose.model('Story', storySchema);

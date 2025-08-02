@@ -540,32 +540,29 @@ const deleteComment = async (req, res, next) => {
   }
 };
 // ================= SHARE POST =================
+// Update sharePost controller
 const sharePost = async (req, res, next) => {
   try {
     const postId = req.params.id;
     const userId = req.user.id;
     const { message } = req.body || {};
     
-    const originalPost = await PostModel.findById(postId);
+    const originalPost = await PostModel.findById(postId)
+      .populate('creator', 'userName fullName profilePhoto media ');
+    
     if (!originalPost) {
       return next(new HttpError(404, 'Post not found'));
     }
     
-    // Check if user is blocked
-    const creator = await getCachedUser(originalPost.creator);
-    if (creator.blockedUsers.some(id => id.equals(userId))) {
-      return next(new HttpError(403, 'Action not allowed'));
-    }
-
     // Create shared post
     const newPost = new PostModel({
       creator: userId,
-      body: message || `Shared post: ${originalPost.body.substring(0, 100)}...`,
+      body: message || `Shared post from @${originalPost.creator.userName}`,
       originalPost: postId,
       sharedContent: {
-        originalCreator: originalPost.creator,
+        originalCreator: originalPost.creator._id,
         originalBody: originalPost.body,
-        originalImage: originalPost.image
+        originalMedia: originalPost.media
       }
     });
 
@@ -575,19 +572,16 @@ const sharePost = async (req, res, next) => {
     originalPost.shares.push({ user: userId });
     await originalPost.save();
     
-    // Log Notification
-    if (!originalPost.creator.equals(userId)) {
-      await notifyParticipants('share', [originalPost.creator], {
-        actor: userId,
-        postId,
-        newPostId: newPost._id,
-        isGroup: false
-      });
-    }
+    // Populate new post for response
+    const populatedPost = await PostModel.populate(newPost, [
+      { path: 'creator', select: 'userName fullName profilePhoto' },
+      { path: 'sharedContent.originalCreator', select: 'userName fullName profilePhoto' }
+    ]);
 
     res.status(201).json({
       message: 'Post shared successfully',
-      sharedPost: newPost
+      sharedPost: populatedPost,
+      originalPost: originalPost // Return updated original post
     });
   } catch (error) {
     console.error('Share Post Error:', error);
@@ -763,6 +757,11 @@ const getPost = async (req, res, next) => {
         }
       })
       .lean();
+
+      // Add isBookmarked status
+    if (userId) {
+      post.isBookmarked = post.bookmarks.some(id => id.toString() === userId);
+    }
 
     // Check post existence and deletion status
     if (!post || post.deletedAt) {
@@ -965,7 +964,6 @@ const getPostsByUser = async (req, res, next) => {
   }
 };
 
-// postControllers.js
 // ================= BOOKMARK POST =================
 const bookmarkPost = async (req, res, next) => {
   try {
@@ -975,25 +973,26 @@ const bookmarkPost = async (req, res, next) => {
     const post = await PostModel.findById(postId);
     if (!post) return next(new HttpError(404, "Post not found"));
 
-    // Check if already bookmarked
-    if (post.bookmarks.some(id => id.toString() === userId)) {
+  // Check if already bookmarked
+    if (post.bookmarks.includes(userId)) {
       return res.status(200).json({
         message: "Post already bookmarked",
         bookmarks: post.bookmarks
       });
     }
-
-    // Update both post and user
+    // Add bookmark
     post.bookmarks.push(userId);
     await post.save();
-    
+
+    // Add to user's bookmarks
     await UserModel.findByIdAndUpdate(userId, {
       $addToSet: { bookmarks: postId }
     });
 
     res.status(200).json({
       message: "Post bookmarked",
-      bookmarks: post.bookmarks
+      bookmarks: post.bookmarks,
+      isBookmarked: true // New field
     });
   } catch (error) {
     console.error("Bookmark Post Error:", error);
@@ -1010,29 +1009,19 @@ const removeBookmark = async (req, res, next) => {
     const post = await PostModel.findById(postId);
     if (!post) return next(new HttpError(404, 'Post not found'));
 
-    // Check if bookmarked
-    const bookmarkIndex = post.bookmarks.findIndex(
-      id => id.toString() === userId
-    );
-    
-    if (bookmarkIndex === -1) {
-      return res.status(200).json({ 
-        message: 'Post not bookmarked',
-        bookmarks: post.bookmarks
-      });
-    }
-
-    // Update both post and user
-    post.bookmarks.splice(bookmarkIndex, 1);
+    // Remove bookmark
+    post.bookmarks.pull(userId);
     await post.save();
-    
+
+    // Remove from user's bookmarks
     await UserModel.findByIdAndUpdate(userId, {
       $pull: { bookmarks: postId }
     });
 
     res.status(200).json({ 
       message: 'Bookmark removed',
-      bookmarks: post.bookmarks
+      bookmarks: post.bookmarks,
+      isBookmarked: false // New field
     });
   } catch (error) {
     console.error('Remove Bookmark Error:', error);

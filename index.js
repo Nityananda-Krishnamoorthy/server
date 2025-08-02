@@ -8,53 +8,63 @@ const upload = require('express-fileupload');
 const { notFound, errorHandler } = require('./middleware/errorMiddleware');
 const { socketHandler } = require('./socket/socket');
 const { createAdapter } = require('@socket.io/redis-adapter');
-const Redis = require('ioredis'); // Fixed: single Redis import
+const Redis = require('ioredis');
 
 const app = express();
+
+// CORS setup
 app.use(cors({ origin: process.env.CLIENT_URL, credentials: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// File upload setup
 app.use(upload({
   useTempFiles: true,
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
   createParentPath: true
 }));
-// Initialize online users set
+
+
+
+
+// Logging middleware (optional)
 app.locals.onlineUsers = new Set();
-  app.use((req, res, next) => {
+app.use((req, res, next) => {
   console.log("INCOMING REQUEST:", req.method, req.originalUrl);
   console.log("Params:", req.params);
   console.log("Body:", req.body);
   console.log("User:", req.user);
   next();
 });
-// Create Redis clients with error handlers
+
+// ===== Redis Setup (Upstash or Local) =====
 let pubClient, subClient;
+const isCluster = process.env.REDIS_CLUSTER === 'true';
 
 const handleRedisError = (clientName) => (err) => {
   console.error(`[Redis Error - ${clientName}]:`, err.message || err);
 };
 
-if (process.env.REDIS_CLUSTER === 'true') {
+if (isCluster) {
   const nodes = JSON.parse(process.env.REDIS_NODES || '[]');
-  pubClient = new Redis.Cluster(nodes);
+  pubClient = new Redis.Cluster(nodes, { redisOptions: { tls: true } });
   subClient = pubClient.duplicate();
 } else {
   pubClient = new Redis(process.env.REDIS_URL, {
-    maxRetriesPerRequest: 5,          // Limit retries
-    enableReadyCheck: true,           // Wait for connection
-    reconnectOnError: () => true,     // Reconnect logic
+    tls: {}, // Important for Upstash TLS
+    maxRetriesPerRequest: 5,
+    enableReadyCheck: true,
+    reconnectOnError: () => true
   });
-
   subClient = pubClient.duplicate();
 }
 
-// Attach error handlers
 pubClient.on('error', handleRedisError('pubClient'));
 subClient.on('error', handleRedisError('subClient'));
 
-// Create server and Socket.IO instance
+// ===== Socket.IO Setup =====
 const server = http.createServer(app);
+
 const io = socketIo(server, {
   cors: {
     origin: process.env.CLIENT_URL,
@@ -64,31 +74,28 @@ const io = socketIo(server, {
   transports: ['websocket', 'polling']
 });
 
-// Set Redis adapter
 io.adapter(createAdapter(pubClient, subClient));
+socketHandler(io, pubClient);
 
-// Pass Redis client to socket handler
-socketHandler(io, pubClient); 
-
-// Share Redis client with app
+// ===== Share Redis client with app =====
 app.locals.redisClient = pubClient;
 
-// Routes
+// ===== Routes =====
 app.use('/api/v1.1', require('./routes/index.js'));
 app.use(notFound);
 app.use(errorHandler);
 
-// Connect to MongoDB and start server
+// ===== Start Server =====
 connect(process.env.MONGO_URI)
   .then(() => {
-    console.log('MongoDB connected');
+    console.log(' MongoDB connected');
     const PORT = process.env.PORT || 3030;
     server.listen(PORT, () => {
-      console.log(`Server running on http://localhost:${PORT}`);
-      console.log(`Using Redis: ${process.env.REDIS_CLUSTER === 'true' ? 'Cluster' : 'Single'}`);
+      console.log(` Server running at http://localhost:${PORT}`);
+      console.log(` Redis Mode: ${isCluster ? 'Cluster' : 'Single'}`);
     });
   })
   .catch((err) => {
-    console.error('MongoDB connection error:', err);
+    console.error(' MongoDB connection error:', err);
     process.exit(1);
   });
