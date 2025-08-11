@@ -45,9 +45,8 @@ cd server
 npm install
 ```
 ### 3️⃣ Environment Variables
-```bash
 Create a .env file in the root directory:
-
+```bash
 PORT=5000
 MONGO_URI=your_mongodb_connection_string
 JWT_SECRET=your_jwt_secret
@@ -82,9 +81,9 @@ Frontend deployed on: [Vercel](https://client-beige-ten-94.vercel.app/)
 ---
 
 ## 🤝 Contributing
-```bash
-Fork the repository
 
+Fork the repository
+```bash
 Create a feature branch (git checkout -b feature/your-feature)
 
 Commit changes (git commit -m 'Add new feature')
@@ -97,14 +96,18 @@ Create a Pull Request
 ---
 
 ## 📜 License
+
 This project is licensed under the MIT License.
 © 2025 Nityananda Krishnamoorthy
 
 ---
 
 ## 🙌 Credits
+
 Inspired by modern social media platforms
 Built with ❤️ by Nityananda Krishnamoorthy
+
+---
 
 
 
