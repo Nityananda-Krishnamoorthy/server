@@ -70,8 +70,11 @@ npm start
 ## 📦 Deployment
 
 Frontend Repo: [client](https://github.com/Nityananda-Krishnamoorthy/client.git)
+
 Backend Repo: [server](https://github.com/Nityananda-Krishnamoorthy/server.git)
+
 Backend deployed on: [Render](https://server-6i3j.onrender.com)
+
 Frontend deployed on: [Vercel](https://client-beige-ten-94.vercel.app/)
 
 ## 🤝 Contributing
