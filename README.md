@@ -100,8 +100,6 @@ Create a Pull Request
 This project is licensed under the MIT License.
 © 2025 Nityananda Krishnamoorthy
 
----
-
 ## 🙌 Credits
 
 Inspired by modern social media platforms
