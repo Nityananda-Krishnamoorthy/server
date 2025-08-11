@@ -107,7 +107,6 @@ This project is licensed under the MIT License.
 Inspired by modern social media platforms
 Built with ❤️ by Nityananda Krishnamoorthy
 
----
 
 
 
